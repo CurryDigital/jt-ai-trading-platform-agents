@@ -1,0 +1,17 @@
+{
+  "event_id": "f18d75a6-91d9-4f59-ba44-deddea2ba029",
+  "domain": "quant",
+  "event_type": "workflow.stuck",
+  "strategy_id": "cf683b50-bae9-448b-8af6-9cbd56221399",
+  "source_agent": "qr_monitor",
+  "payload_json": {
+    "workflow_id": "cf683b50-bae9-448b-8af6-9cbd56221399",
+    "stage": "experiment.started",
+    "responsible_agent": "qr_hub",
+    "elapsed_minutes": 15.65,
+    "threshold_minutes": 15,
+    "stuck_count": 1,
+    "requeued": true
+  },
+  "hub_dispatch_ts": "2026-03-21T06:50:00Z"
+}

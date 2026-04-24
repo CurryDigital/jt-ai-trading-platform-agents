@@ -1,0 +1,41 @@
+# Ignore qr_frontend agent directory
+agents/qr_frontend/
+
+# Ignore all memory folders in agents
+agents/*/memory/
+
+# Ignore Python virtual environment
+venv/
+
+# Ignore IDE/OS files
+__pycache__/
+*.pyc
+.DS_Store
+.vscode/
+.idea/
+
+# Ignore OpenClaw internal
+.openclaw/
+.clawhub/
+
+# Ignore node_modules (if any JS projects)
+node_modules/
+
+# Ignore local env files (except the one we're using for token)
+.env.local
+.env.*.local
+
+# Ignore logs
+*.log
+logs/
+
+# Ignore build artifacts
+dist/
+build/
+*.egg-info/
+
+# Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore OS files
+Thumbs.db

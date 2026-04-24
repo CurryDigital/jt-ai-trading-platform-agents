@@ -1,0 +1,83 @@
+{
+  "refresh_id": "etl-20260417-104100",
+  "started_at": "2026-04-17T10:41:00Z",
+  "completed_at": "2026-04-17T10:50:00Z",
+  "state": "ready",
+  "locked_since": null,
+  "audit_summary": {
+    "total_gold_tables": 68,
+    "stale_gold_tables": 2,
+    "total_consumption_tables": 24,
+    "stale_consumption_tables": 4,
+    "total_consumption_views": 51
+  },
+  "fixes_applied": {
+    "stock_metrics": "✅ FIXED - Now current via stock_metrics_history view",
+    "stock_metrics_history": "✅ Refreshed 283,833 rows",
+    "technical_indicators": "✅ Fixed compute script (nested window + overflow bugs)",
+    "market_sentiment_daily": "✅ Already fixed",
+    "kpis_metrics": "✅ Already current",
+    "index_metrics": "✅ Already current",
+    "markets_stocks_overview": "✅ Already fixed"
+  },
+  "stale_gold_tables": {
+    "critical": {
+      "macro_indicators": {
+        "status": "⚠️ 137 days stale (2025-12-01)",
+        "rows": 1369,
+        "issue": "No external macro data source (FRED, World Bank)",
+        "existing_script": null,
+        "recommendation": "Add bronze/macro data ingestion first"
+      }
+    },
+    "medium": {
+      "commodity_futures": {
+        "status": "⚠️ 59 days stale (2026-02-17) - ingestion script broken",
+        "rows": 40242,
+        "issue": "yfinance API change - single ticker download returns different structure",
+        "existing_script": "bronze/yfinance/ingest_yfinance.py",
+        "recommendation": "Fix pandas Series scalar extraction"
+      }
+    },
+    "low_priority": {
+      "etf_daily_data": "49 days - Low priority, views auto-update",
+      "sector_etfs": "108 days - View auto-updates from underlying",
+      "interbank_rates": "35 days - FX data secondary priority",
+      "v_commodity_daily": "56 days - View auto-updates",
+      "v_macro_indicators": "137 days - View auto-updates",
+      "v_sector_etfs": "108 days - View auto-updates"
+    }
+  },
+  "stale_consumption_tables": {
+    "agent_health": "710h stale - Needs consumption/command/agent_health.py",
+    "promoted_strategies": "710h stale - Needs consumption/lab/promoted_strategies.py",
+    "research_pipeline": "710h stale - Needs consumption/lab/research_pipeline.py",
+    "settings_data_sources": "1332h stale - Needs consumption/command/settings_data_sources.py"
+  },
+  "current_tables": {
+    "gold": {
+      "stock_metrics": "3,112 rows | 2026-04-16 | ✅ FIXED",
+      "stock_metrics_history": "1,488,318 rows | 2026-04-16 | ✅",
+      "kpis_metrics": "23,896 rows | 2026-04-16 | ✅",
+      "index_metrics": "18,613 rows | 2026-04-16 | ✅",
+      "earnings_data": "16,206 rows | ✅",
+      "earnings_signals": "15,343 rows | ✅",
+      "sue_scores": "13,980 rows | ✅"
+    },
+    "consumption": {
+      "markets_stocks_overview": "836 rows | 2026-04-17 | ✅",
+      "dashboard_market_overview": "20 rows | 2026-04-16 | ✅",
+      "research_sue_scores": "13,980 rows | 2026-04-16 | ✅"
+    }
+  },
+  "pipeline_gaps": [
+    "bronze/yfinance/ingest_yfinance.py - commodity futures broken",
+    "gold.macro_indicators - Needs external data source (FRED)",
+    "4 consumption tables - Scripts don't exist or not in pipeline"
+  ],
+  "notes": "Critical stock_metrics now current. Technical indicators fixed with bounds checking. Commodity ingestion needs pandas fix. 66 tickers still missing from stock_metrics due to data quality issues.",
+  "scripts_modified": [
+    "silver/compute_technical_indicators.py - Fixed nested window + overflow",
+    "gold/equity/build_stock_metrics.py - Created for future use (view handles current data)"
+  ]
+}

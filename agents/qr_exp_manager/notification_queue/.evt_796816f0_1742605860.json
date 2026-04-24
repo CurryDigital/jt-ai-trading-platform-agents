@@ -1,0 +1,17 @@
+{
+  "event_id": "796816f0-5195-4b45-bccc-a2cc322fd35d",
+  "domain": "quant",
+  "event_type": "qa.validated",
+  "strategy_id": "cf683b50-bae9-448b-8af6-9cbd56221399",
+  "source_agent": "qr_qa",
+  "payload_json": {
+    "value": 0.68,
+    "metric": "sharpe_ratio_is_oos",
+    "passed": false,
+    "threshold": 0.75,
+    "failed_gate": 5,
+    "rejection_reason": "Failed gate 5: sharpe_ratio_is_oos 0.68 below threshold 0.75. IS/OOS ratio suggests overfitting. Narrow lookback window or simplify parameters."
+  },
+  "hub_dispatch_ts": "2026-03-22T01:31:00Z",
+  "fallback_reason": "sessions_send timeout after wake"
+}

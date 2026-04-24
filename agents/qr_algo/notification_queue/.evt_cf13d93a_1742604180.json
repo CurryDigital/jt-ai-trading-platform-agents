@@ -1,0 +1,15 @@
+{
+  "event_id": "cf13d93a-8923-40d4-852c-fc4629de29ae",
+  "domain": "quant",
+  "event_type": "dataset.ready",
+  "strategy_id": "cf683b50-bae9-448b-8af6-9cbd56221399",
+  "source_agent": "qr_data_validator",
+  "payload_json": {
+    "coverage": 0.9619,
+    "stub_gates": [2, 4],
+    "gates_passed": [1, 2, 3, 4, 5],
+    "dataset_version": "2026-03-21T01:38:55Z"
+  },
+  "hub_dispatch_ts": "2026-03-22T01:03:00Z",
+  "fallback_reason": "sessions_send timeout - agent unresponsive"
+}
