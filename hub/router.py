@@ -61,8 +61,10 @@ class HubRouter:
         ("quant", "experiment.started"):  ["qr_data_validator"],
         ("quant", "dataset.ready"):       ["qr_algo"],
         ("quant", "backtest.completed"):  ["qr_risk"],   # Risk gates before QA
-        ("quant", "risk.evaluated"):      ["qr_qa"],
-        ("quant", "qa.validated"):        ["qr_exp_manager", "qr_idea_intake"],  
+        # qr_debate runs as a parallel observer of risk.evaluated (telemetry only).
+        # qr_qa does not depend on its output, so debate failures cannot stall QA.
+        ("quant", "risk.evaluated"):      ["qr_qa", "qr_debate"],
+        ("quant", "qa.validated"):        ["qr_exp_manager", "qr_idea_intake"],
         ("quant", "workflow.stuck"):      ["qr_monitor", "qr_idea_intake"],       
         ("quant", "system.startup"):      ["qr_monitor"],
         ("quant", "etl.completed"):       ["qr_monitor"],
@@ -85,6 +87,7 @@ class HubRouter:
         "qr_algo":       "agent:qr_algo:main",
         "qr_risk":       "agent:qr_risk:main",
         "qr_qa":         "agent:qr_qa:main",
+        "qr_debate":     "agent:qr_debate:main",
         "qr_exp_manager":    "agent:qr_exp_manager:main",
         "qr_idea_intake":    "agent:qr_idea_intake:main",
         "qr_hub":            "agent:qr_hub:main",

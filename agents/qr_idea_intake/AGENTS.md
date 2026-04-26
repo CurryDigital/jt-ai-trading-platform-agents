@@ -1,92 +1,141 @@
 # AGENTS.md — qr_idea_intake
 
-## Boot Sequence
-1. Read MEMORY.md for operator preferences and shorthand
-2. Read skills/idea_parsing.md for parsing rules
-
-BATCH PROCESSING OVERRIDE: If the operator submits a numbered list of multiple strategies, you MUST process them all in a single loop. You are permitted to bypass the "10 experiments in progress" flood control limit for this specific batch. Generate a unique uuid for each strategy and execute the strategy_workflow and events inserts sequentially for all items.
-
-## When operator sends a message (via Telegram)
-
-### Check message type
-
-**Pipeline alert** (contains workflow.stuck, qa.validated, etc.):
-Format concisely and relay to operator:
-- QA pass: "✓ Strategy {id} promoted. Sharpe OOS: {x}, Drawdown: {y}."
-- QA fail: "✗ Strategy {id} rejected gate {N}: {reason}."
-- Stuck: "⚠ Experiment {id} stuck at {stage} for {N} min."
-
-**Status query** (status, what's running, how many, experiments):
-```sql
-SELECT COUNT(*) FROM openclaw_researcher.strategy_workflow
-WHERE status NOT IN ('completed', 'failed', 'golden', 'rejected');
--- plus: completed today, passed today, best all-time sharpe
+```contract
+SUBSCRIBES:    qa.validated, workflow.stuck, etl.partial, etl.failed, etl.operator_alert
+EMITS:         experiment.started
+SIDE_EFFECTS:  strategy_workflow (INSERT), events (INSERT)
+HEARTBEAT:     */5 * * * *
+IDEMPOTENCY:   event_processing(event_id, agent_name='qr_idea_intake')
+INVARIANTS:
+  - The Telegram channel is the only operator-facing surface — no other agent posts.
+  - Flood control is never bypassed. Batched submissions are queued one-at-a-time
+    and rejected once MAX_INTAKE_IN_PROGRESS in-flight is reached.
+  - Every queued idea has a unique strategy_id (uuid4) and a strategy_workflow row
+    inserted BEFORE the experiment.started event is emitted.
 ```
-Format as brief status report.
 
-**Trading idea** (everything else):
-Parse and queue per procedure below.
+## Boot
+1. Read `MEMORY.md` for operator preferences and shorthand vocabulary.
+2. Read `skills/idea_parsing.md` for the parse order.
+3. Read `agents/shared/constants.py::MAX_INTAKE_IN_PROGRESS` (current: 10).
 
-### Parse trading idea
+## Trigger sources
 
-Follow skills/idea_parsing.md parse order:
-1. Extract strategy_type (required — ask if missing)
-2. Extract asset_universe (required — ask if missing)
-3. Extract date_range (default: last 3 years)
-4. Extract numeric params (default from strategy type)
-5. If both strategy_type AND asset_universe missing: ask ONE question covering both
-6. Never ask about optional fields — default them
+| Trigger | Action |
+|---------|--------|
+| Telegram inbound | route by message-type (alert / status / idea) |
+| Hub wake on `qa.validated` | format result, notify operator, mark processed |
+| Hub wake on `workflow.stuck` / `etl.failed` / `etl.partial` | format alert, notify operator |
 
-### Before queuing
+## Workflow — Telegram inbound
 
-**Flood control:**
-```sql
-SELECT COUNT(*) FROM openclaw_researcher.strategy_workflow
-WHERE status NOT IN ('completed', 'failed', 'golden', 'rejected');
-```
-If ≥ 10: reply "Pipeline busy: {N} experiments in progress (limit 10). Try again later."
+### Classify the message
 
-**Duplicate check:**
-```sql
-SELECT 1 FROM openclaw_researcher.events
-WHERE event_type = 'experiment.started' AND domain = 'quant'
-  AND created_at > NOW() - INTERVAL '30 days'
-  AND payload_json->'param_set' = '{sorted_json}';
-```
-If found: reply "This was already run {N} days ago. Change something to make it distinct."
+- Contains an event payload (qa.validated, workflow.stuck, etl.*) → **alert relay**
+- Matches `/status`, "what's running", "how many" → **status report**
+- Anything else → **trading idea**
 
-### Queue the experiment
+### Alert relay format (one line each)
+
+| Event | Format |
+|-------|--------|
+| qa.validated (passed) | `✓ {sid} promoted. SharpeOOS {sharpe} · DD {dd} · trades {n}.` |
+| qa.validated (failed) | `✗ {sid} rejected gate {N}: {reason}.` |
+| workflow.stuck        | `⚠ {sid} stuck at {stage} for {min} min ({requeued? "requeued":"escalated"}).` |
+| etl.partial / failed  | `⚠ ETL {state}: {sources_failed}` |
+
+### Status report
+
+Single SQL, single line back:
 
 ```sql
--- Create strategy_workflow row FIRST
-INSERT INTO openclaw_researcher.strategy_workflow
-  (strategy_id, name, status, experiment_id, assigned_by)
-VALUES ('{uuid}', '{type}_{asset}_{date}', 'pending', '{exp_id}', 'qr_idea_intake');
-
--- Then emit experiment.started event
-INSERT INTO openclaw_researcher.events
-  (event_type, strategy_id, payload_json, source_agent, domain)
-VALUES ('experiment.started', '{strategy_id}',
-  '{"experiment_id":"{exp_id}","strategy_id":"{sid}",
-    "param_set":{...},"generation":1,
-    "parent_experiment_id":null,"source":"idea_intake"}',
-  'qr_idea_intake', 'quant');
+SELECT
+  COUNT(*) FILTER (WHERE status NOT IN ('completed','failed','golden','rejected')) AS in_flight,
+  COUNT(*) FILTER (WHERE status='golden' AND completed_at::date = CURRENT_DATE) AS golden_today,
+  (SELECT MAX(sharpe_oos) FROM strategy_lineage) AS top_sharpe_alltime
+FROM strategy_workflow;
 ```
 
-Reply to operator:
-```
-Queued: {strategy_type} on [{assets}], {start} → {end}.
-Lookback: {N}d, entry: {x}, exit: {y}.
-Experiment ID: {uuid}
-```
+Reply: `In-flight {in_flight}/10 · Golden today {golden_today} · Top SharpeOOS all-time {top_sharpe}`.
 
-Hub will pick it up on its next 5-minute heartbeat.
+### Trading idea — parse → flood → dedup → queue
 
-## When woken by Hub (sessions_send with qa.validated)
+1. **Parse** per `skills/idea_parsing.md` (strategy_type required, asset_universe required, dates default to 3y, numeric params default by type).
+2. **Missing fields** — ask ONE question covering up to two missing required fields. Never ask about optionals.
+3. **Flood control** (no bypass, ever):
 
-Format the result and notify the operator via the Telegram channel.
-Reply REPLY_SKIP after processing (fire-and-forget from Hub's perspective).
+   ```sql
+   SELECT COUNT(*) FROM openclaw_researcher.strategy_workflow
+   WHERE status NOT IN ('completed','failed','golden','rejected');
+   ```
 
-## Learning triggers
-- Operator corrections to parsing → log to .learnings/LEARNINGS.md with category "correction"
-- Recurring shorthand the operator uses → update MEMORY.md
+   If `>= MAX_INTAKE_IN_PROGRESS`: reply `Pipeline busy: {N}/{limit} in flight. Try later.` and stop.
+
+4. **Dedup** — canonicalise the param_set to sorted-key JSON, hash, and check:
+
+   ```sql
+   SELECT 1 FROM openclaw_researcher.events
+   WHERE event_type = 'experiment.started' AND domain = 'quant'
+     AND created_at > NOW() - INTERVAL '30 days'
+     AND md5(payload_json::text) = md5(:canonical_param_set::text)
+   LIMIT 1;
+   ```
+
+   If found: reply `Run {N}d ago — change a parameter to make it distinct.` and stop.
+
+5. **Queue** — workflow row first, then event, both in one transaction:
+
+   ```sql
+   BEGIN;
+   INSERT INTO openclaw_researcher.strategy_workflow
+     (strategy_id, name, status, experiment_id, assigned_by)
+   VALUES (:sid, :name, 'pending', :exp_id, 'qr_idea_intake');
+
+   INSERT INTO openclaw_researcher.events
+     (event_type, strategy_id, payload_json, source_agent, domain)
+   VALUES ('experiment.started', :sid, :payload_json, 'qr_idea_intake', 'quant');
+   COMMIT;
+   ```
+
+   `payload_json` schema:
+
+   ```json
+   {
+     "experiment_id":   "<uuid>",
+     "strategy_id":     "<uuid>",
+     "param_set":       { ... canonicalised ... },
+     "generation":      1,
+     "parent_experiment_id": null,
+     "source":          "idea_intake"
+   }
+   ```
+
+6. **Reply** — one line: `Queued: {type} on [{assets}], {start}→{end}. Lookback {N}d, entry {x}, exit {y}. id={sid}`.
+
+7. The hub picks it up on its next 5-min cycle.
+
+### Batched submissions (numbered list of N strategies)
+
+Process one at a time, each subject to flood control. If flood control trips
+mid-batch, reply `Queued K/N ideas before flood-control limit. Resubmit the
+remaining {N-K} once pipeline drains.` There is no override.
+
+## Failure modes
+
+| Symptom | Recovery |
+|---------|----------|
+| Operator's parsing correction rejects a queued strategy | Log to `.learnings/PARSING_CORRECTIONS.md`. After 3 occurrences of the same shorthand, promote rule to `MEMORY.md`. |
+| Telegram delivery fails | Re-emit as a `workflow.stuck` so qr_monitor surfaces it on next 30m cycle. Do NOT loop. |
+| Hub wakes us with an event we have no handler for | Log + mark processed (silent skip is the bug, not a feature). |
+
+## Success metrics
+
+- Time from operator message to `experiment.started` ≤ 30s (P95).
+- 0 bypasses of flood control per quarter.
+- 0 duplicate experiments (same canonical param_set within 30d).
+- 100% of `qa.validated` events relayed to operator within one heartbeat (5 min).
+
+## Skills consulted
+
+- `skills/idea_parsing.md`
+- `skills/strategy_registry.md` (for default param ranges)

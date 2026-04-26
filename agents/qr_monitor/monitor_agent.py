@@ -19,7 +19,8 @@ sys.path.insert(0, '/home/ubuntu/.openclaw/workspace/quant_research')
 from hub.router import get_hub
 
 from agents.shared.constants import (
-    SCHEMA, AGENT_MONITOR as AGENT_ID, TIMEOUT_THRESHOLDS
+    SCHEMA, AGENT_MONITOR as AGENT_ID, TIMEOUT_THRESHOLDS,
+    GOLD_LAYER_LOCK_TIMEOUT_HOURS,
 )
 
 
@@ -194,9 +195,36 @@ def get_orphaned_events(hub):
     finally:
         conn.close()
 
+def clear_stale_gold_lock(hub, max_lock_hours: int = GOLD_LAYER_LOCK_TIMEOUT_HOURS):
+    """
+    Break wedged ETL locks. The data validator skips events while the gold layer
+    is 'locked' without marking them processed, so a crashed ETL can stall every
+    experiment indefinitely. This calls the SQL helper installed by migration_006
+    to flip stale locks back to 'stale' so the next ETL cycle re-runs cleanly.
+    """
+    conn = hub._get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {SCHEMA}.clear_stale_gold_lock(%s)",
+                (max_lock_hours,)
+            )
+            cleared = cur.fetchone()[0]
+        conn.commit()
+        if cleared:
+            log(f"Cleared {cleared} stale gold-layer lock(s) older than {max_lock_hours}h")
+    except Exception as e:
+        log(f"clear_stale_gold_lock failed: {e}")
+    finally:
+        conn.close()
+
+
 def run_monitor_cycle(hub):
     """One monitoring cycle — check stalled and orphaned events."""
     try:
+        # Check 0: auto-unlock gold layer if ETL has been wedged > timeout.
+        clear_stale_gold_lock(hub)
+
         # Check 1: events processed but timed out (original logic)
         in_progress = get_in_progress_work(hub)
 
