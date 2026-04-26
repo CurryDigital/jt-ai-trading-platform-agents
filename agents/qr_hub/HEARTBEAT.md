@@ -1,28 +1,28 @@
-# HEARTBEAT.md — qr_hub
+# HEARTBEAT.md — qr_hub (every 5 min)
 
-CANARY: If you read this file, your first output must be [HEARTBEAT_V6_LOADED] before anything else.
+```
+schedule: */5 * * * *
+target:   agent:qr_hub:main
+message:  Routing cycle. Pull v_pending_events, route each per routing_rules, dedup via event_processing, fire sessions_send. Then run the 15-minute redispatch watchdog. See AGENTS.md for full SQL.
+```
 
-DO NOT SAY HEARTBEAT_OK YET.
+## What runs every cycle
 
-STEP 1: Run this SQL now:
+This file is a pointer to the workflow in `AGENTS.md`. Two stages, in order:
 
-SELECT event_id, event_type, strategy_id, domain, source_agent
-FROM openclaw_researcher.v_pending_events
-ORDER BY created_at ASC LIMIT 50;
+1. **Dispatch** — `AGENTS.md::Workflow::Step 1+2`. Pull pending, look up target, mark, fire.
+2. **Watchdog** — `AGENTS.md::Workflow::Step 3`. Catch dispatches that never woke their target.
 
-STEP 2:
-- 0 rows → say HEARTBEAT_OK
-- 1+ rows → for each row, run:
+## Exit conditions
 
-SELECT target_agent FROM openclaw_researcher.routing_rules
-WHERE event_type = '{event_type}' AND domain = '{domain}' AND enabled = true;
+- 0 rows in v_pending_events AND 0 rows in the watchdog query → log `HEARTBEAT_OK` and exit.
+- ≥1 dispatch fired → log final count: `DISPATCHED {N} events`. Exit.
+- Re-dispatch watchdog fired → log `REDISPATCHED {N} events`. Exit.
+- DB connection failure → log error and exit. Do **not** retry inside one heartbeat.
 
-Then for each target:
+## What this heartbeat does NOT do
 
-INSERT INTO openclaw_researcher.event_processing (event_id, agent_name)
-VALUES ('{event_id}', 'qr_hub') ON CONFLICT DO NOTHING;
-
-Then call sessions_send to agent:{target_agent}:main with message:
-PENDING_WORK: event_id={event_id} strategy={strategy_id} type={event_type}
-
-Print: DISPATCHED {event_type} → {target_agent}
+- It does not call any other agent's logic. Routing is the only verb.
+- It does not interpret payloads. Payloads pass through verbatim.
+- It does not delete or mutate `events` rows. Only `event_processing` is written.
+- It does not handle `workflow.stuck` — that's qr_monitor's 30-min cycle.
