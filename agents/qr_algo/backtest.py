@@ -30,6 +30,7 @@ from agents.shared.constants import (
     TRANSACTION_COST_PCT,
     RISK_FREE_RATE,
     ANNUALISATION_FACTOR,
+    DEFAULT_DATA_SOURCE,
 )
 
 
@@ -81,19 +82,57 @@ class InsufficientDataError(RuntimeError):
 
 # ─── Data loading ───────────────────────────────────────────────────────────
 
-def load_prices(conn, asset_universe: List[str], start: _date, end: _date) -> Dict[str, List[Bar]]:
+# Allow-list for `data_source`. We refuse arbitrary strings (the value
+# interpolates straight into SQL — table names cannot be parameterised in
+# psycopg2). New asset classes are added here, NOT in param_set free-form.
+ALLOWED_DATA_SOURCES = {
+    "gold.stock_metrics_history",  # equities (default)
+    "gold.crypto_metrics",         # crypto
+    "gold.fx_metrics",              # FX
+    "gold.commodity_metrics",       # commodities
+    "gold.market_metrics",          # macro / VIX / yield curves
+}
+
+
+def _resolve_data_source(param_set: Dict[str, Any]) -> str:
+    """Pick the price-data table for this experiment. Defaults to equities."""
+    src = param_set.get("data_source", DEFAULT_DATA_SOURCE)
+    if src not in ALLOWED_DATA_SOURCES:
+        raise InsufficientDataError(
+            f"data_source={src!r} not allow-listed. "
+            f"Add it to ALLOWED_DATA_SOURCES in backtest.py if it exists in the gold layer. "
+            f"Currently supported: {sorted(ALLOWED_DATA_SOURCES)}"
+        )
+    return src
+
+
+def load_prices(
+    conn,
+    asset_universe: List[str],
+    start: _date,
+    end: _date,
+    data_source: str = DEFAULT_DATA_SOURCE,
+) -> Dict[str, List[Bar]]:
     """
     Pull price bars for every ticker in `asset_universe` between `start` and `end`
-    (inclusive) from gold.stock_metrics_history. Returns a per-ticker list of
-    Bar objects sorted ascending by date. Tickers with zero rows are omitted —
+    (inclusive) from `data_source`. Returns a per-ticker list of Bar objects
+    sorted ascending by date. Tickers with zero rows are omitted —
     qr_data_validator's coverage check should already have flagged that.
+
+    `data_source` must be a fully-qualified table name from ALLOWED_DATA_SOURCES.
+    The table must expose columns (ticker, date, close, volume) at minimum.
     """
+    if data_source not in ALLOWED_DATA_SOURCES:
+        raise InsufficientDataError(f"data_source={data_source!r} not allow-listed")
+
     out: Dict[str, List[Bar]] = {}
     with conn.cursor() as cur:
+        # Table name cannot be parameterised, but we've validated it against
+        # the allow-list above — so this string-format is safe.
         cur.execute(
-            """
+            f"""
             SELECT ticker, date, close::float, volume::float
-            FROM   gold.stock_metrics_history
+            FROM   {data_source}
             WHERE  ticker = ANY(%s)
               AND  date BETWEEN %s AND %s
             ORDER  BY ticker, date
@@ -339,7 +378,8 @@ def run_backtest(
     if start is None or end is None:
         raise InsufficientDataError(f"param_set.date_range invalid: {date_range!r}")
 
-    bars_by_ticker = load_prices(conn, asset_universe, start, end)
+    data_source = _resolve_data_source(param_set)
+    bars_by_ticker = load_prices(conn, asset_universe, start, end, data_source=data_source)
     if not any(bars_by_ticker.values()):
         return [], _empty_metrics(), "no_data"
 

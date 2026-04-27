@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 import sys
 from datetime import date, timedelta
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 # Make `from agents.shared.constants import ...` work when run directly.
 import os
@@ -37,10 +37,12 @@ from agents.qr_algo.backtest import (
     UnsupportedStrategyError, InsufficientDataError,
     apply_round_trip_cost, annualised_sharpe, max_drawdown, cvar,
     split_trading_days, label_period, compute_metrics,
+    ALLOWED_DATA_SOURCES,
 )
-from agents.qr_algo.strategies import run_strategy
+from agents.qr_algo.strategies import run_strategy, STRATEGY_REGISTRY
 from agents.shared.constants import (
     BACKTEST_IS_OOS_SPLIT, TRANSACTION_COST_PCT, ANNUALISATION_FACTOR, RISK_FREE_RATE,
+    DEFAULT_DATA_SOURCE,
 )
 
 
@@ -61,6 +63,31 @@ def oscillating_bars(centre: float, days: int, amplitude: float = 5.0) -> List[B
             close=centre + amplitude * math.sin(2 * math.pi * i / 20))
         for i in range(days)
     ]
+
+
+def stairstep_bars(start_close: float, days: int, jump_every: int = 30,
+                    jump_size: float = 10.0) -> List[Bar]:
+    """Flat → sudden jump → flat. Used to verify breakout fires on jumps."""
+    out: List[Bar] = []
+    level = start_close
+    for i in range(days):
+        if i > 0 and i % jump_every == 0:
+            level += jump_size
+        out.append(Bar(date=date(2026, 1, 1) + timedelta(days=i), close=level, volume=100.0))
+    return out
+
+
+def cointegrated_pair(days: int, drift_a: float = 0.5, noise_ampl: float = 2.0) -> Tuple[List[Bar], List[Bar]]:
+    """Two series with a stationary spread — pairs should fire mean-reversion."""
+    bars_a, bars_b = [], []
+    for i in range(days):
+        common = i * drift_a
+        a_close = 100 + common + noise_ampl * math.sin(2 * math.pi * i / 30)
+        b_close = 100 + common - noise_ampl * math.sin(2 * math.pi * i / 30)
+        d = date(2026, 1, 1) + timedelta(days=i)
+        bars_a.append(Bar(date=d, close=a_close, volume=1.0))
+        bars_b.append(Bar(date=d, close=b_close, volume=1.0))
+    return bars_a, bars_b
 
 
 # ─── Pure-math helpers ─────────────────────────────────────────────────────
@@ -168,6 +195,190 @@ def test_mean_reversion_fires_on_oscillation():
     assert trades, "expected mean-reversion trades on a sinusoidal series"
     # Some trades should land in IS and some in OOS over a 200-day window.
     assert any(t.period_type == "IS" for t in trades)
+
+
+# ─── New strategies: breakout / pairs / cross_sectional / seasonal ─────────
+
+def test_breakout_fires_on_stairstep_with_volume_confirm():
+    bars = {"JUMP": stairstep_bars(100, 200, jump_every=40, jump_size=8.0)}
+    boundary = split_trading_days(bars)
+    trades = run_strategy(
+        "breakout", bars,
+        {"lookback_window": 20, "volume_multiplier": 1.0,
+         "trailing_stop_pct": 0.05, "max_holding_days": 30},
+        boundary,
+    )
+    assert trades, "breakout should fire when price jumps above its rolling high"
+    for t in trades:
+        gross = (t.exit_price / t.entry_price) - 1.0
+        assert math.isclose(t.pnl_pct, gross - 2 * TRANSACTION_COST_PCT, rel_tol=1e-9)
+        assert t.exit_reason in ("trailing_stop", "time_stop", "eod")
+
+
+def test_breakout_volume_filter_blocks_weak_breakouts():
+    """When volume_multiplier is high and volume is constant-low, no entries fire."""
+    bars = {"FLAT_VOL": [
+        Bar(date=date(2026, 1, 1) + timedelta(days=i),
+            close=100 + i * 0.5,
+            volume=1.0)
+        for i in range(80)
+    ]}
+    boundary = split_trading_days(bars)
+    trades = run_strategy(
+        "breakout", bars,
+        {"lookback_window": 20, "volume_multiplier": 5.0,
+         "trailing_stop_pct": 0.05, "max_holding_days": 30},
+        boundary,
+    )
+    assert trades == [], "expected zero trades when volume filter cannot be satisfied"
+
+
+def test_pairs_strategy_requires_two_tickers():
+    bars = {"ONLY_ONE": linear_uptrend_bars(100, 100)}
+    boundary = split_trading_days(bars)
+    try:
+        run_strategy("pairs", bars,
+                     {"asset_universe": ["ONLY_ONE"], "lookback_window": 20},
+                     boundary)
+    except UnsupportedStrategyError as e:
+        assert "exactly 2 tickers" in str(e)
+        return
+    raise AssertionError("expected UnsupportedStrategyError for single-ticker pairs")
+
+
+def test_pairs_fires_on_cointegrated_spread():
+    bars_a, bars_b = cointegrated_pair(300, drift_a=0.3, noise_ampl=4.0)
+    bars = {"AAA": bars_a, "BBB": bars_b}
+    boundary = split_trading_days(bars)
+    trades = run_strategy(
+        "pairs", bars,
+        {"asset_universe": ["AAA", "BBB"],
+         "lookback_window": 30, "entry_threshold": 1.0,
+         "exit_threshold": 0.2, "hedge_ratio": 1.0,
+         "max_holding_days": 30},
+        boundary,
+    )
+    assert trades, "pairs should fire when spread oscillates around mean"
+    # Each round-trip closure produces 2 trades (one per leg) — count must be even.
+    assert len(trades) % 2 == 0, "pairs trades come in pairs (one per leg)"
+
+
+def test_cross_sectional_long_top_quantile():
+    # Three tickers with very different trends: A trends up, B flat, C trends down.
+    bars = {
+        "A_UP":   [Bar(date=date(2026, 1, 1) + timedelta(days=i), close=100 + i * 1.2) for i in range(120)],
+        "B_FLAT": [Bar(date=date(2026, 1, 1) + timedelta(days=i), close=100.0)         for i in range(120)],
+        "C_DOWN": [Bar(date=date(2026, 1, 1) + timedelta(days=i), close=100 - i * 0.8) for i in range(120)],
+    }
+    boundary = split_trading_days(bars)
+    trades = run_strategy(
+        "cross_sectional", bars,
+        {"lookback_window": 20, "quantile": 0.34,   # one ticker held at a time
+         "rebalance_days": 21, "direction": "long_top"},
+        boundary,
+    )
+    assert trades, "cross_sectional should hold the trending winner over multiple rebalances"
+    # The trending-up asset should dominate the trade ledger.
+    a_count = sum(1 for t in trades if t.ticker == "A_UP")
+    c_count = sum(1 for t in trades if t.ticker == "C_DOWN")
+    assert a_count > c_count, f"A_UP should be picked more than C_DOWN (got A={a_count}, C={c_count})"
+
+
+def test_cross_sectional_long_bottom_inverts_choice():
+    bars = {
+        "A_UP":   [Bar(date=date(2026, 1, 1) + timedelta(days=i), close=100 + i * 1.2) for i in range(120)],
+        "B_FLAT": [Bar(date=date(2026, 1, 1) + timedelta(days=i), close=100.0)         for i in range(120)],
+        "C_DOWN": [Bar(date=date(2026, 1, 1) + timedelta(days=i), close=100 - i * 0.8) for i in range(120)],
+    }
+    boundary = split_trading_days(bars)
+    trades = run_strategy(
+        "cross_sectional", bars,
+        {"lookback_window": 20, "quantile": 0.34,
+         "rebalance_days": 21, "direction": "long_bottom"},
+        boundary,
+    )
+    a_count = sum(1 for t in trades if t.ticker == "A_UP")
+    c_count = sum(1 for t in trades if t.ticker == "C_DOWN")
+    assert c_count > a_count, "long_bottom should prefer the loser, not the winner"
+
+
+def test_seasonal_window_simple_summer():
+    """Hold each ticker between June 1 and Aug 31 every year."""
+    bars = {"X": [
+        Bar(date=date(2026, 1, 1) + timedelta(days=i), close=100 + i * 0.1)
+        for i in range(365)
+    ]}
+    boundary = split_trading_days(bars)
+    trades = run_strategy(
+        "seasonal", bars,
+        {"start_month": 6, "start_day": 1, "end_month": 8, "end_day": 31},
+        boundary,
+    )
+    assert trades, "seasonal must produce a trade for the configured window"
+    # Trade should sit fully inside (or end at) the configured calendar window.
+    for t in trades:
+        assert t.entry_date.month in (5, 6, 7, 8), f"entry {t.entry_date} outside expected season"
+
+
+def test_seasonal_window_year_wrap_winter():
+    """Configurable window may wrap: Nov 1 → Apr 30 spans year-end."""
+    bars = {"X": [
+        Bar(date=date(2026, 1, 1) + timedelta(days=i), close=100 + i * 0.1)
+        for i in range(540)
+    ]}
+    boundary = split_trading_days(bars)
+    trades = run_strategy(
+        "seasonal", bars,
+        {"start_month": 11, "start_day": 1, "end_month": 4, "end_day": 30},
+        boundary,
+    )
+    assert trades, "seasonal must support year-wrapping windows"
+
+
+def test_seasonal_requires_explicit_window_params():
+    """No defaults: caller must specify the calendar window."""
+    bars = {"X": linear_uptrend_bars(100, 60)}
+    boundary = split_trading_days(bars)
+    try:
+        run_strategy("seasonal", bars, {}, boundary)  # missing all 4 keys
+    except UnsupportedStrategyError as e:
+        assert "start_month" in str(e) or "param_set" in str(e)
+        return
+    raise AssertionError("expected UnsupportedStrategyError when seasonal params missing")
+
+
+# ─── Data-source flexibility (asset-class agnostic) ───────────────────────
+
+def test_default_data_source_is_equities():
+    assert DEFAULT_DATA_SOURCE == "gold.stock_metrics_history"
+    assert DEFAULT_DATA_SOURCE in ALLOWED_DATA_SOURCES
+
+
+def test_data_source_allow_list_blocks_arbitrary_strings():
+    """SQL injection guard: data_source must be allow-listed; 'evil' rejected."""
+
+    class _AnyConn:
+        def cursor(self): raise AssertionError("should not reach DB layer")
+
+    try:
+        bt.run_backtest(
+            _AnyConn(),
+            {"asset_universe": ["X"],
+             "date_range": {"start": "2026-01-01", "end": "2026-06-01"},
+             "strategy_type": "momentum",
+             "data_source": "evil_table; DROP TABLE events; --"},
+        )
+    except InsufficientDataError as e:
+        assert "not allow-listed" in str(e)
+        return
+    raise AssertionError("expected InsufficientDataError on non-allow-listed data_source")
+
+
+def test_strategy_registry_now_has_six_types():
+    assert sorted(STRATEGY_REGISTRY) == [
+        "breakout", "cross_sectional", "mean_reversion",
+        "momentum", "pairs", "seasonal",
+    ]
 
 
 # ─── End-to-end: ledger / metrics consistency (Gate 0 invariant) ───────────
