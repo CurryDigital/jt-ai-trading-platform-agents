@@ -53,6 +53,23 @@ TRANSACTION_COST_PCT     = 0.0005  # 5 bps round-trip
 RISK_FREE_RATE           = 0.04    # annualised
 ANNUALISATION_FACTOR     = 252     # daily bars
 
+# Default price-data source. Strategies may override via param_set['data_source'].
+# This is the asset-class hook: equities → gold.stock_metrics_history,
+# crypto → gold.crypto_metrics, FX → gold.fx_metrics, etc. The schema must
+# expose (ticker, date, close, volume) at minimum.
+DEFAULT_DATA_SOURCE = "gold.stock_metrics_history"
+
+# ─── qr_monitor requeue backoff (Tier 3 resilience) ───────────────────────
+# Exponential backoff before re-attempting a stuck event. The N-th requeue
+# requires that at least REQUEUE_BACKOFF_MINUTES[N] minutes have elapsed
+# since the previous requeue. After MAX_REQUEUE_COUNT, the workflow is
+# escalated to 'failed' instead of being requeued again.
+#   - Index 0 = "first strike" requeue (no prior requeue → no wait)
+#   - Index 1 = "second strike" (must wait this many minutes since first)
+#   - Index 2 = "third strike"  (must wait this many since second)
+REQUEUE_BACKOFF_MINUTES = (0, 30, 120)
+MAX_REQUEUE_COUNT       = len(REQUEUE_BACKOFF_MINUTES)
+
 # ─── Risk scoring weights / thresholds (qr_risk) ───────────────────────────
 # Note: actual gate values live in `risk_config`; these are scoring knobs only.
 RISK_APPROVAL_THRESHOLD   = 0.34   # score below this → approved

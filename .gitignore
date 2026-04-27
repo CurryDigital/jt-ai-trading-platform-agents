@@ -18,6 +18,14 @@ __pycache__/
 .openclaw/
 .clawhub/
 
+# Hub fallback notification queue — runtime artefact when sessions_send unavailable
+hub/.notification_queue
+
+# qr_etl_manager runtime state
+agents/qr_etl_manager/.state.json
+agents/*/.state.json
+agents/*/.requests/
+
 # Ignore node_modules (if any JS projects)
 node_modules/
 

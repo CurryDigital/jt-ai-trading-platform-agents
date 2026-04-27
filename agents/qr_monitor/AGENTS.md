@@ -9,10 +9,15 @@ SIDE_EFFECTS:  event_processing (DELETE on requeue), workflow_events (INSERT),
 HEARTBEAT:     */30 * * * *
 IDEMPOTENCY:   workflow_events row with event_type='monitor_requeue' per (event_id) — one requeue per event, ever.
 INVARIANTS:
-  - First strike: requeue once. Second strike: escalate to failed. Never a third try.
+  - Per-event exponential backoff before each requeue. The N-th requeue
+    requires REQUEUE_BACKOFF_MINUTES[N] minutes since the previous one
+    (currently (0, 30, 120) — first is immediate, then 30m, then 120m).
+    After MAX_REQUEUE_COUNT (3) requeues, the workflow is marked failed.
+  - Defense-in-depth at the workflow level: a workflow that has accumulated
+    MAX_REQUEUE_COUNT stuck events across its lifetime is also marked failed.
   - Monitor never overrides QA decisions. It only watches for liveness.
-  - Gold-layer locks older than GOLD_LAYER_LOCK_TIMEOUT_HOURS (12h) are auto-cleared
-    so a crashed ETL cannot stall every experiment indefinitely.
+  - Gold-layer locks older than GOLD_LAYER_LOCK_TIMEOUT_HOURS (12h) are
+    auto-cleared so a crashed ETL cannot stall every experiment indefinitely.
 ```
 
 ## Boot
@@ -64,7 +69,16 @@ TIMEOUT_THRESHOLDS = {
 
 If `elapsed > threshold`:
 
-1. **Count prior strikes** for this workflow:
+1. **Per-event requeue history**:
+
+   ```sql
+   SELECT COUNT(*) AS cnt, MAX(created_at) AS last_at
+   FROM   openclaw_researcher.workflow_events
+   WHERE  event_type = 'monitor_requeue'
+     AND  data->>'event_id' = :event_id;
+   ```
+
+   Plus the workflow-level safety net (defense-in-depth):
 
    ```sql
    SELECT COUNT(*) FROM openclaw_researcher.events
@@ -72,13 +86,20 @@ If `elapsed > threshold`:
      AND  payload_json->>'workflow_id' = :workflow_id;
    ```
 
-2. **Decision**:
+2. **Decision** (in order):
 
-   | Strikes so far | Action |
-   |----------------|--------|
-   | 0              | requeue (DELETE the event_processing row), emit `workflow.stuck(requeued=true)` |
-   | 1              | emit `workflow.stuck(requeued=false)` (escalation — qr_idea_intake notifies operator) |
-   | ≥ 2            | mark `strategy_workflow.status='failed'`, write `workflow_failed` audit event, do not emit further |
+   | Condition | Action |
+   |-----------|--------|
+   | `workflow_stuck_count >= MAX_REQUEUE_COUNT` | mark `strategy_workflow.status='failed'`. Workflow has accumulated too many stuck events across its lifetime — unrecoverable. |
+   | `requeue_count >= MAX_REQUEUE_COUNT` (3) | mark failed AND emit one final `workflow.stuck(requeued=false)` so the operator is notified. |
+   | `(now - last_requeue_at) < REQUEUE_BACKOFF_MINUTES[requeue_count]` | **skip this cycle** — log backoff state, do nothing else. The next 30-min wake reconsiders. |
+   | otherwise | DELETE the event_processing row (requeue), write `monitor_requeue` workflow_event with the new strike count, emit `workflow.stuck(requeued=true, requeue_count=N+1)`. |
+
+   Backoff schedule: `REQUEUE_BACKOFF_MINUTES = (0, 30, 120)`.
+   - 1st strike: immediate (no prior requeue → no wait)
+   - 2nd strike: requires 30 min since the 1st
+   - 3rd strike: requires 120 min since the 2nd
+   - After the 3rd: escalation, no more requeues
 
 3. Always write to `workflow_events` so the next cycle can see what happened.
 

@@ -204,15 +204,36 @@ class QAAgent(Agent):
 
     def _write_lineage_and_emit(self, event_id, strategy_id, experiment_id, metrics, risk_score, param_set, gate_result):
         """
-        Write strategy_lineage AND insert qa.validated event atomically in one transaction.
-        Both writes share a single connection — if either fails, both roll back.
-        This prevents the crash window where lineage is written but no downstream event is emitted.
+        Atomicity contract (DO NOT split this method):
+            ONE connection. ONE cursor block. TWO INSERTs. ONE commit().
+        If lineage is written but qa.validated is not emitted (or vice versa),
+        the operator's MTBF for "promoted but no event" goes from 0 to ∞.
+        Postgres' transactional guarantee is doing the work; the code below
+        only has to keep both writes inside one BEGIN..COMMIT.
+
+        Defensive guards (Tier 3 resilience):
+          1. After conn.commit(), verify cur.connection IS conn — catches any
+             future refactor that accidentally splits the cursor onto a
+             different connection.
+          2. The exception path explicitly rolls back; no half-committed state.
+        See agents/qr_qa/test_qa_atomicity.py for the regression test that
+        enforces this contract.
         """
         conn = self.hub._get_conn()
-        source_event_id = event_id  # FIX: was undefined, caused NameError on every QA pass
+        source_event_id = event_id  # propagated into both rows for traceability
+        new_event_id = str(uuid.uuid4())
         try:
             with conn.cursor() as cur:
-                # 1. Write to strategy_lineage
+                # GUARD: cursor must be bound to the connection we opened above.
+                # If a future refactor accidentally uses a different cursor or
+                # connection, this assertion fires before we commit anything.
+                assert cur.connection is conn, (
+                    "QA atomicity violation: cursor bound to different connection. "
+                    "Both INSERTs must run on the same conn for the lineage + "
+                    "qa.validated promotion to be atomic."
+                )
+
+                # 1. Write to strategy_lineage.
                 cur.execute(f"""
                     INSERT INTO {SCHEMA}.strategy_lineage
                         (strategy_id, experiment_id, dataset_version, backtest_engine_version,
@@ -230,8 +251,7 @@ class QAAgent(Agent):
                     json.dumps(param_set) if param_set else None
                 ))
 
-                # 2. Insert qa.validated event directly (same transaction)
-                new_event_id = str(uuid.uuid4())
+                # 2. Insert qa.validated event directly (SAME cursor, same txn).
                 payload = {
                     'event_id': str(event_id),
                     'strategy_id': strategy_id,
@@ -255,12 +275,17 @@ class QAAgent(Agent):
                     strategy_id, json.dumps(payload), AGENT_ID
                 ))
 
+            # Single commit — the only one in this method.
             conn.commit()
-            self._log(f"Strategy {strategy_id}: lineage written and qa.validated emitted atomically (event {new_event_id})")
+            self._log(
+                f"Strategy {strategy_id}: lineage written and qa.validated emitted "
+                f"atomically (event {new_event_id}, source_event_id {source_event_id})"
+            )
             return new_event_id
 
         except Exception:
             conn.rollback()
+            self._log(f"Strategy {strategy_id}: lineage+event ROLLBACK due to exception")
             raise
         finally:
             conn.close()

@@ -1,18 +1,41 @@
-# TOOLS.md
+# TOOLS.md — qr_qa
 
 ## Database
-- Schema: openclaw_researcher
-- Auth: Standard Static Password (via DB_PASSWORD, DB_HOST, DB_USER, DB_NAME env vars). Do NOT use IAM or boto3.
-- Region: ap-southeast-1
 
-## Key tables
-- events, event_processing, strategy_workflow, strategy_lineage
-- risk_config, gold_layer_state, routing_rules, workflow_events
-- views: v_pending_events (for Hub), v_qr_data_validator_work, v_qr_algo_work, v_qr_risk_work, v_qr_debate_work, v_qr_qa_work
+- **Schema:** `openclaw_researcher`
+- **Auth:** static password (`/home/ubuntu/.openclaw/.env::DB_PASSWORD`). NOT IAM/boto3.
 
-## Quick SQL patterns
-- Pending events: SELECT id AS event_id, event_type, strategy_id, payload_json, created_at FROM openclaw_researcher.v_qr_qa_work LIMIT 1;
-- Mark processed: INSERT INTO openclaw_researcher.event_processing (event_id, agent_name) VALUES (?,?) ON CONFLICT DO NOTHING
-- Emit event: INSERT INTO openclaw_researcher.events (event_type, strategy_id, payload_json, source_agent, domain) VALUES (?,?,?,?,?)
+## Tables / views I read
 
-## Full schema: run `cat docs/schema.md` for complete DDL
+- `v_qr_qa_work` — primary work queue
+- `strategy_workflow` — metrics, conviction_score, debate_summary
+- `strategy_backtest_trades` — Gate 0 anti-hallucination evidence
+- `risk_config` (name LIKE 'qa_%') — 4 QA thresholds
+
+## Tables I write
+
+| Table | Operation | Trigger |
+|-------|-----------|---------|
+| `strategy_lineage`  | INSERT | ON PASS only — atomic with qa.validated |
+| `events`            | INSERT (`qa.validated` passed=true) | ON PASS — same transaction as lineage |
+| `events`            | INSERT (`qa.validated` passed=false) | ON FAIL |
+| `event_processing`  | INSERT (idempotency) | every event |
+| `workflow_events`   | INSERT (audit) | start + end |
+
+## Constants imported
+
+```python
+from agents.shared.constants import (
+    SCHEMA, QUANT_DOMAIN as DOMAIN,
+    AGENT_QA as AGENT_ID,
+)
+from agents.shared.threshold import check_threshold
+```
+
+## Denied
+
+- No write to `risk_config` (operator + qr_architect).
+- No `sessions_send` (hub-only).
+- No reads of risk gates (`name NOT LIKE 'qa_%'`) — that's qr_risk's surface.
+- No web access.
+- No partial promotions: never INSERT into `strategy_lineage` without committing the matching `qa.validated` event in the same transaction.

@@ -30,21 +30,27 @@ Optional: `BOOTSTRAP.md` for one-shot first-run setup.
 
 ## Agent topology
 
+All agents share a single 30-minute heartbeat cadence. Time-bound work
+(daily ETL, nightly variant generation, weekly summary) is implemented
+inside the agent as a self-gate against `workflow_events` — not by
+varying the cron interval. This keeps the scheduler boring and makes
+missed wakeups recover automatically on the next cycle.
+
 | Agent | Lifecycle | Heartbeat | Role |
 |-------|-----------|-----------|------|
-| qr_hub            | Always-on | 5m   | Sole event router (sessions_send) + dedup ledger |
-| qr_monitor        | Always-on | 30m  | Stuck-workflow watchdog + gold-layer auto-unlock |
-| qr_architect      | Always-on | 1h   | Self-improvement loop (proposes diffs, never auto-merges) |
-| qr_macro_sentinel | Always-on | 2h   | Geopolitical event scanner |
-| qr_researcher     | Always-on | 6h   | Autonomous idea generation |
-| qr_etl_manager    | Always-on | daily| Bronze→silver→gold supply chain |
-| qr_idea_intake    | Reactive  | 5m   | Telegram operator + qa.validated notifier |
-| qr_exp_manager    | Reactive  | daily| Variant generation + family pruning |
-| qr_data_validator | Reactive  | —    | Gold-layer gate + 5 quality checks |
-| qr_algo           | Reactive  | —    | Backtest engine (currently stubbed; see Tier 2) |
-| qr_risk           | Reactive  | —    | 6-flag risk evaluation against `risk_config` |
-| qr_debate         | Reactive  | —    | Bull/bear telemetry, parallel observer of risk.evaluated |
-| qr_qa             | Reactive  | —    | 5 quality gates + atomic lineage promotion |
+| qr_hub            | Always-on | 30m | Sole event router (sessions_send) + dedup ledger |
+| qr_monitor        | Always-on | 30m | Stuck-workflow watchdog + gold-layer auto-unlock |
+| qr_architect      | Always-on | 30m (self-gates 4h) | Self-improvement loop — proposes diffs, never auto-merges |
+| qr_macro_sentinel | Always-on | 30m (self-gates 2h) | Geopolitical event scanner |
+| qr_researcher     | Always-on | 30m (self-gates 6h) | Autonomous idea generation |
+| qr_etl_manager    | Always-on | 30m (self-gates daily) | Bronze→silver→gold supply chain |
+| qr_idea_intake    | Reactive  | 30m | Telegram operator + qa.validated notifier |
+| qr_exp_manager    | Reactive  | 30m (nightly + weekly self-gates) | Variant generation + family pruning |
+| qr_data_validator | Reactive  | 30m | Gold-layer gate + 5 quality checks |
+| qr_algo           | Reactive  | 30m | Backtest engine (currently stubbed; see Tier 2) |
+| qr_risk           | Reactive  | 30m | 6-flag risk evaluation against `risk_config` |
+| qr_debate         | Reactive  | 30m | Bull/bear telemetry, parallel observer of risk.evaluated |
+| qr_qa             | Reactive  | 30m | 5 quality gates + atomic lineage promotion |
 
 ---
 

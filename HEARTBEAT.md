@@ -1,114 +1,146 @@
 # HEARTBEAT.md — Autonomous schedules
 
-Each block below declares one scheduled wakeup. The scheduler reads the
-fenced `cron` block; the prose tells the agent what to do once awake.
-Per-agent heartbeats live in `agents/<id>/HEARTBEAT.md`.
+**One cadence. Every agent wakes every 30 minutes.** Time-bound work is
+self-gated by the agent against `workflow_events`, not by a custom cron.
+This keeps the scheduler boring, missed wakeups recover automatically on
+the next cycle, and the operator only has to reason about a single
+interval.
+
+Per-agent heartbeats live in `agents/<id>/HEARTBEAT.md` and inherit the
+schedule below.
 
 Format (machine-parseable — do not change keys):
 
 ```
-schedule: <cron>          # UTC, 5-field crontab
-target:   agent:<id>:main # session key the scheduler wakes
-message:  <one paragraph instruction sent as the wake message>
+schedule: */30 * * * *   # 5-field crontab in UTC
+target:   agent:<id>:main
+message:  <one paragraph instruction the harness sends as the wake message>
 ```
 
 ---
 
-## Hub dispatch (every 5 min)
-
-`qr_hub` polls `v_pending_events`, routes each via `sessions_send`, and
-records the dedup row. Without this loop nothing else fires.
+## The fleet — 13 agents, one schedule
 
 ```
-schedule: */5 * * * *
+schedule: */30 * * * *
 target:   agent:qr_hub:main
-message:  Routing cycle. Read v_pending_events LIMIT 50, dispatch each event to its target_agent(s) per routing_rules, INSERT into event_processing with agent_name='qr_hub'. Then check v_monitor_overview for events stuck > 15 minutes since dispatch and emit workflow.stuck for each.
+message:  Routing cycle. Drain v_pending_events, route each row per routing_rules, dedup via event_processing(agent_name='qr_hub'), fire sessions_send to each target. Then run the 15-minute redispatch watchdog and emit workflow.stuck after the second strike. Full SQL in agents/qr_hub/AGENTS.md.
 ```
-
-## Pipeline health (every 30 min)
-
-`qr_monitor` clears stale gold-layer locks (>12h), re-queues stuck events
-once, and escalates after the second strike.
 
 ```
 schedule: */30 * * * *
 target:   agent:qr_monitor:main
-message:  Health cycle. (1) Call openclaw_researcher.clear_stale_gold_lock(12) to break wedged ETL locks. (2) Read v_monitor_overview, compare elapsed_minutes against TIMEOUT_THRESHOLDS; first strike → re-queue + workflow.stuck(requeued=true), second strike → mark workflow failed. (3) Read orphaned events with no event_processing row; log and warn. Only escalate breaches that are real.
+message:  Health cycle. (1) clear_stale_gold_lock(12). (2) v_monitor_overview vs TIMEOUT_THRESHOLDS — first strike requeue, second strike escalate, third strike fail. (3) orphan detection. (4) gold-layer audit. (5) Sundays — workspace snapshot, MEMORY archive, learning promotion.
 ```
 
-## Self-improvement (hourly)
-
-`qr_architect` audits the contract surface against the running code and
-opens diffs against AGENTS.md / .py when they drift. It never auto-merges.
-
 ```
-schedule: 0 * * * *
-target:   agent:qr_architect:main
-message:  Drift audit. For each agent, read agents/<id>/AGENTS.md::contract and compare against routing_rules + the agent's .py SUBSCRIBES/EMITS. If they disagree, write a proposal to .learnings/ARCHITECTURE_DRIFT.md. Promote to MEMORY.md only after the same drift is observed 3 cycles in a row.
+schedule: */30 * * * *
+target:   agent:qr_data_validator:main
+message:  Drain v_qr_data_validator_work. Gold-layer gate first; if locked/stale, skip without marking processed. Otherwise run the 5 quality checks, update strategy_workflow status='data_validated', emit dataset.ready, mark processed.
 ```
 
-## Macro scan (every 2h)
-
-`qr_macro_sentinel` watches for geopolitical events that should seed
-experiments.
-
 ```
-schedule: 0 */2 * * *
-target:   agent:qr_macro_sentinel:main
-message:  Macro scan. Rotate through the watchlist queries. For each significant event log to .learnings/MACRO_EVENTS.md with confidence ∈ {low,medium,high}. Only emit experiment.started when confidence=high AND a historical precedent is in MEMORY.md. Otherwise queue for the operator to triage.
+schedule: */30 * * * *
+target:   agent:qr_algo:main
+message:  Drain v_qr_algo_work. Run backtest, populate strategy_backtest_trades, write metrics to strategy_workflow, emit backtest.completed. Trade count in metrics MUST match COUNT(*) of trades inserted — anti-hallucination guard.
 ```
 
-## Idea generation (every 6h)
-
-`qr_researcher` expands the search tree when the pipeline is quiet.
-
 ```
-schedule: 0 */6 * * *
-target:   agent:qr_researcher:main
-message:  Idea cycle. If COUNT(strategy_workflow WHERE status NOT IN ('completed','failed','golden','rejected')) >= FLOOD_CONTROL_LIMIT, exit OK. Otherwise pick 1-2 underexplored cells from skills/strategy_registry.md, draft hypotheses, and emit experiment.started. Do not duplicate a param_set seen in the last 30 days.
+schedule: */30 * * * *
+target:   agent:qr_risk:main
+message:  Drain v_qr_risk_work. Load thresholds from risk_config (name NOT LIKE 'qa_%'). Run 6 checks, compute risk_score = flags/6, set risk_approved = (score == 0). ALWAYS emit risk.evaluated — even on rejection.
 ```
 
-## ETL refresh (daily 14:00 UTC = 22:00 SGT)
-
-`qr_etl_manager` runs bronze→silver→gold. Locks the gold layer at start,
-unlocks on finish (success/partial/failed). qr_monitor breaks the lock if
-this never finishes.
+```
+schedule: */30 * * * *
+target:   agent:qr_debate:main
+message:  Drain v_qr_debate_work, max 5 per cycle. If risk_approved=false, fast-fail with conviction=0 and skip the bull/bear write-up. Otherwise produce 3 bullets bull, 3 bullets bear, conviction ∈ [0,1]. Emit debate.completed. (Telemetry only — qr_qa does not wait.)
+```
 
 ```
-schedule: 0 14 * * *
+schedule: */30 * * * *
+target:   agent:qr_qa:main
+message:  Drain v_qr_qa_work. Run 5 gates in order, stop at first fail. ON PASS — INSERT strategy_lineage AND emit qa.validated in ONE transaction. ON FAIL — emit qa.validated(passed=false) with the failed gate number. Mark processed.
+```
+
+```
+schedule: */30 * * * *
+target:   agent:qr_exp_manager:main
+message:  Two phases. (a) Reactive — drain v_exp_manager_work, generate variants per the failed_gate→mutation table, dedup by canonical param_set. (b) Self-gated — if 16:00-16:30 UTC and no 'nightly_cycle_complete' workflow_event today, run nightly seeding from top performers; if Sunday and no 'weekly_summary_complete' this week, write the weekly digest.
+```
+
+```
+schedule: */30 * * * *
+target:   agent:qr_idea_intake:main
+message:  Notification cycle. Find the next un-relayed event of interest from {qa.validated, workflow.stuck, etl.partial, etl.failed, etl.operator_alert}. Format per AGENTS.md, deliver to operator over Telegram, mark processed. One event per cycle — do not loop.
+```
+
+```
+schedule: */30 * * * *
 target:   agent:qr_etl_manager:main
-message:  Daily refresh. UPDATE gold_layer_state SET state='locked', locked_since=NOW(). Run bronze sources in dependency order. Run daily_refresh.sh for silver/gold/consumption. UPDATE gold_layer_state with final state ∈ {ready, partial, stale}. Emit etl.completed | etl.partial | etl.failed.
+message:  Self-gated. If a 'daily_cycle_complete' workflow_event exists for today (UTC) → HEARTBEAT_OK. Otherwise — only between 14:00-14:30 UTC — UPDATE gold_layer_state SET state='locked', run bronze sources, run daily_refresh.sh, UPDATE gold_layer_state with final state ∈ {ready,partial,stale}, emit etl.completed | etl.partial | etl.failed, write 'daily_cycle_complete' workflow_event.
 ```
 
-## Variant generation (daily 16:00 UTC = 00:00 SGT)
-
-`qr_exp_manager` seeds tomorrow's experiments from today's winners.
-
 ```
-schedule: 0 16 * * *
-target:   agent:qr_exp_manager:main
-message:  Nightly cycle. Query strategy_lineage for sharpe_oos > EXP_NIGHTLY_TOP_SHARPE in the last EXP_NIGHTLY_LOOKBACK_DAYS. If any: generate EXP_PHASE2_VARIANTS variants around the best param_set per family. If none: seed EXP_NIGHTLY_FALLBACK_COUNT random experiments across underexplored types in skills/strategy_registry.md. Report one line: "Today: N completed, M passed QA, top Sharpe OOS: X.XX".
+schedule: */30 * * * *
+target:   agent:qr_researcher:main
+message:  Self-gated 6h. If MAX(workflow_events.created_at WHERE event_type='researcher_cycle_complete') > NOW() - 6h → HEARTBEAT_OK. Otherwise pick 1-2 underexplored cells from skills/strategy_registry.md (mode rotates by hour: news, data, cross-asset, failure-driven), draft hypotheses, emit experiment.started, dedupe within 30 days.
 ```
 
-## Weekly summary (Sun 00:00 UTC = Sun 08:00 SGT)
+```
+schedule: */30 * * * *
+target:   agent:qr_macro_sentinel:main
+message:  Self-gated 2h. If MAX(workflow_events.created_at WHERE event_type='macro_scan_complete') > NOW() - 2h → HEARTBEAT_OK. Otherwise rotate one query from the watchlist, log significant findings to .learnings/MACRO_EVENTS.md, emit experiment.started ONLY when confidence=high AND historical precedent exists in MEMORY.md.
+```
 
 ```
-schedule: 0 0 * * 0
-target:   agent:qr_exp_manager:main
-message:  Weekly summary. Query strategy_lineage for the past 7 days. Report total experiments, QA pass rate, top 3 by sharpe_oos, most common rejection gate, and a one-sentence direction for next week's parameter search. Send via qr_idea_intake to operator.
+schedule: */30 * * * *
+target:   agent:qr_architect:main
+message:  Self-gated 4h. If MAX(workflow_events.created_at WHERE event_type='architect_cycle_complete') > NOW() - 4h → HEARTBEAT_OK. Otherwise pick the rotation slot for this 4h window — research / performance review / skill evolution / design validation — and write findings to .learnings/. Promote to MEMORY.md only after the same observation 3 cycles in a row. Never auto-merge code or schema changes.
 ```
 
 ---
 
+## How the self-gate works
+
+Each time-bound agent writes a marker after completing its cycle:
+
+```sql
+INSERT INTO openclaw_researcher.workflow_events (event_type, agent, data)
+VALUES ('<id>_cycle_complete', '<id>', jsonb_build_object('cycle','<window>'));
+```
+
+At the start of every wake, it checks:
+
+```sql
+SELECT MAX(created_at) FROM openclaw_researcher.workflow_events
+WHERE agent = '<id>' AND event_type = '<id>_cycle_complete';
+```
+
+If the result is within the agent's window (6h, 2h, 4h, today, this week, …),
+log `HEARTBEAT_OK` and exit. Otherwise run the work and write a fresh marker.
+
+This pattern means:
+- Missed wakeups self-recover on the next 30-min cycle.
+- A single agent reliably runs at most once per window even if the harness fires twice.
+- The operator can force a re-run by deleting the marker row.
+
 ## Operator overrides
 
-The operator can pause any heartbeat by inserting:
+Pause any agent by disabling its dispatch rule:
 
 ```sql
 UPDATE openclaw_researcher.routing_rules
 SET enabled = FALSE
-WHERE event_type = '<scheduled trigger event>' AND domain = 'quant';
+WHERE target_agent = '<id>';
 ```
 
-There is no global pause switch by design. Disabling the hub stops
-dispatching but agents will still accept direct wakes from the operator.
+Force a self-gated re-run:
+
+```sql
+DELETE FROM openclaw_researcher.workflow_events
+WHERE agent = '<id>' AND event_type = '<id>_cycle_complete'
+  AND created_at::date = CURRENT_DATE;
+```
+
+The next 30-min wake will rerun the gated work.

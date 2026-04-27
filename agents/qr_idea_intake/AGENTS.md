@@ -4,7 +4,7 @@
 SUBSCRIBES:    qa.validated, workflow.stuck, etl.partial, etl.failed, etl.operator_alert
 EMITS:         experiment.started
 SIDE_EFFECTS:  strategy_workflow (INSERT), events (INSERT)
-HEARTBEAT:     */5 * * * *
+HEARTBEAT:     */30 * * * *
 IDEMPOTENCY:   event_processing(event_id, agent_name='qr_idea_intake')
 INVARIANTS:
   - The Telegram channel is the only operator-facing surface — no other agent posts.
