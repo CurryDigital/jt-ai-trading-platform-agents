@@ -4,7 +4,7 @@
 SUBSCRIBES:    none (polls v_pending_events on heartbeat — does not consume specific event types)
 EMITS:         workflow.stuck (only on re-dispatch escalation)
 SIDE_EFFECTS:  event_processing (INSERT, agent_name='qr_hub')
-HEARTBEAT:     */5 * * * *
+HEARTBEAT:     */30 * * * *
 IDEMPOTENCY:   event_processing(event_id, agent_name='qr_hub')
 INVARIANTS:
   - qr_hub is the ONLY agent that calls sessions_send. All other agents
