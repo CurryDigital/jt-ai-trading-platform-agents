@@ -1,18 +1,36 @@
-# TOOLS.md
+# TOOLS.md — qr_debate
 
 ## Database
-- Schema: openclaw_researcher
-- Auth: Standard Static Password (via DB_PASSWORD, DB_HOST, DB_USER, DB_NAME env vars). Do NOT use IAM or boto3.
-- Region: ap-southeast-1
 
-## Key tables
-- events, event_processing, strategy_workflow, strategy_lineage
-- risk_config, gold_layer_state, routing_rules, workflow_events
-- views: v_pending_events (for Hub), v_qr_data_validator_work, v_qr_algo_work, v_qr_risk_work, v_qr_debate_work
+- **Schema:** `openclaw_researcher`
+- **Auth:** static password (`/home/ubuntu/.openclaw/.env::DB_PASSWORD`). NOT IAM/boto3.
 
-## Quick SQL patterns
-- Pending events: SELECT id AS event_id, event_type, strategy_id, payload_json, created_at FROM openclaw_researcher.v_qr_debate_work LIMIT 1;
-- Mark processed: INSERT INTO openclaw_researcher.event_processing (event_id, agent_name) VALUES (?,?) ON CONFLICT DO NOTHING
-- Emit event: INSERT INTO openclaw_researcher.events (event_type, strategy_id, payload_json, source_agent, domain) VALUES (?,?,?,?,?)
+## Tables / views I read
 
-## Full schema: run `cat docs/schema.md` for complete DDL
+- `v_qr_debate_work` — primary work queue
+- `strategy_workflow` — metrics + risk decision context
+- `events` — to find the originating `experiment.started` payload (hypothesis)
+
+## Tables I write
+
+| Table | Operation | Trigger |
+|-------|-----------|---------|
+| `strategy_workflow` | UPDATE (conviction_score, debate_summary) | every event |
+| `events`            | INSERT (`debate.completed`) | every event |
+| `event_processing`  | INSERT (idempotency) | every event |
+
+## Constants imported
+
+```python
+from agents.shared.constants import (
+    SCHEMA, QUANT_DOMAIN as DOMAIN,
+    AGENT_DEBATE as AGENT_ID,
+)
+```
+
+## Denied
+
+- No `sessions_send` calls.
+- No write to `strategy_lineage` (qr_qa only).
+- No use of sub-agents — sequential processing only.
+- No web access — debate is informed by what risk and algo already produced.
