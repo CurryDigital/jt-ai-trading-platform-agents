@@ -21,7 +21,9 @@ from hub.router import get_hub
 from agents.shared.constants import (
     SCHEMA, AGENT_MONITOR as AGENT_ID, TIMEOUT_THRESHOLDS,
     GOLD_LAYER_LOCK_TIMEOUT_HOURS,
+    REQUEUE_BACKOFF_MINUTES, MAX_REQUEUE_COUNT,
 )
+from agents.qr_monitor._backoff import requeue_eligible
 
 
 def get_in_progress_work(hub):
@@ -64,24 +66,35 @@ def check_workflow_stuck_count(hub, workflow_id):
     finally:
         conn.close()
 
-def has_been_requeued(hub, event_id):
-    """Check if this event has already been re-queued once."""
+def get_requeue_state(hub, event_id):
+    """
+    Return (requeue_count, last_requeue_at_utc) for this event_id.
+    Used by the exponential-backoff gate so we don't hammer events that
+    are still cooling off from a previous requeue.
+    """
     conn = hub._get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(f"""
-                SELECT COUNT(*) as requeue_count
+                SELECT COUNT(*) AS cnt, MAX(created_at) AS last_at
                 FROM {SCHEMA}.workflow_events
                 WHERE data->>'event_id' = %s
                   AND event_type = 'monitor_requeue'
             """, (str(event_id),))
-            result = cur.fetchone()
-            return (result[0] if result else 0) > 0
+            row = cur.fetchone() or (0, None)
+            return int(row[0] or 0), row[1]
     finally:
         conn.close()
 
-def emit_workflow_stuck(hub, event_id, workflow_id, stuck_at_event, agent_name, elapsed_minutes, requeued):
-    """Emit workflow.stuck event."""
+
+def has_been_requeued(hub, event_id):
+    """Back-compat wrapper. New code should call get_requeue_state."""
+    cnt, _ = get_requeue_state(hub, event_id)
+    return cnt > 0
+
+def emit_workflow_stuck(hub, event_id, workflow_id, stuck_at_event, agent_name,
+                        elapsed_minutes, requeued, requeue_count=0):
+    """Emit workflow.stuck event with the current requeue_count for downstream agents."""
     conn = hub._get_conn()
     try:
         payload = {
@@ -90,7 +103,7 @@ def emit_workflow_stuck(hub, event_id, workflow_id, stuck_at_event, agent_name, 
             'agent_name': agent_name,
             'elapsed_seconds': int(elapsed_minutes * 60),
             'requeued': requeued,
-            'requeue_count': 1 if requeued else 0
+            'requeue_count': int(requeue_count),
         }
 
         with conn.cursor() as cur:
@@ -106,10 +119,15 @@ def emit_workflow_stuck(hub, event_id, workflow_id, stuck_at_event, agent_name, 
                     (event_type, agent, from_status, to_status, data)
                 VALUES
                     ('workflow.stuck', %s, 'stuck', 'escalated', %s)
-            """, (AGENT_ID, json.dumps({'target_event_id': str(event_id), 'workflow_id': workflow_id})))
+            """, (AGENT_ID, json.dumps({
+                'target_event_id': str(event_id),
+                'workflow_id': workflow_id,
+                'requeue_count': int(requeue_count),
+            })))
 
         conn.commit()
-        log(f"Emitted workflow.stuck for workflow_id {workflow_id} at {stuck_at_event}")
+        log(f"Emitted workflow.stuck for workflow_id {workflow_id} at {stuck_at_event} "
+            f"(requeue_count={requeue_count}, requeued={requeued})")
     finally:
         conn.close()
 
@@ -243,23 +261,45 @@ def run_monitor_cycle(hub):
             if elapsed < threshold:
                 continue
 
-            log(f"workflow_id {workflow_id} stuck at {event_type} for {int(elapsed)} minutes. Agent: {agent_id}.")
+            log(f"workflow_id {workflow_id} stuck at {event_type} for {int(elapsed)}m. agent={agent_id}.")
 
-            stuck_count = check_workflow_stuck_count(hub, workflow_id)
-
-            if stuck_count >= 2:
-                mark_failed(hub, workflow_id, f"Exceeded 2 stuck events for {event_type}")
+            # Defense-in-depth: a workflow that's already accumulated many stuck
+            # events across its lifetime is unrecoverable. Don't keep retrying.
+            workflow_stuck_count = check_workflow_stuck_count(hub, workflow_id)
+            if workflow_stuck_count >= MAX_REQUEUE_COUNT:
+                mark_failed(hub, workflow_id,
+                            f"Exceeded {MAX_REQUEUE_COUNT} stuck events at {event_type}")
                 continue
 
-            already_requeued = has_been_requeued(hub, event_id)
+            # Per-event exponential backoff. Skip this cycle if we're still
+            # cooling off from a previous requeue.
+            requeue_count, last_requeue_at = get_requeue_state(hub, event_id)
+            eligible, wait_remaining = requeue_eligible(requeue_count, last_requeue_at)
 
-            if already_requeued:
-                emit_workflow_stuck(hub, event_id, workflow_id, event_type, agent_id, elapsed, requeued=False)
-                log(f"Re-queue already attempted. Emitting workflow.stuck for escalation.")
-            else:
-                requeue_event(hub, event_id)
-                emit_workflow_stuck(hub, event_id, workflow_id, event_type, agent_id, elapsed, requeued=True)
-                log(f"Re-queuing once.")
+            if requeue_count >= MAX_REQUEUE_COUNT:
+                # Final escalation: this event has burned through every requeue.
+                mark_failed(hub, workflow_id,
+                            f"Exhausted {MAX_REQUEUE_COUNT} requeue attempts at {event_type}")
+                emit_workflow_stuck(hub, event_id, workflow_id, event_type, agent_id,
+                                    elapsed, requeued=False, requeue_count=requeue_count)
+                continue
+
+            if not eligible:
+                log(f"Backoff active for event {event_id}: "
+                    f"requeue_count={requeue_count}, wait≈{int(wait_remaining)}m more.")
+                continue
+
+            # Eligible to requeue. Strike N+1.
+            requeue_event(hub, event_id)
+            new_count = requeue_count + 1
+            emit_workflow_stuck(hub, event_id, workflow_id, event_type, agent_id,
+                                elapsed, requeued=True, requeue_count=new_count)
+            backoff_for_next = (REQUEUE_BACKOFF_MINUTES[new_count]
+                                if new_count < MAX_REQUEUE_COUNT
+                                else None)
+            log(f"Requeued event {event_id} (strike {new_count}/{MAX_REQUEUE_COUNT}, "
+                f"next eligible in {backoff_for_next}m)" if backoff_for_next is not None
+                else f"Requeued event {event_id} (FINAL strike {new_count}/{MAX_REQUEUE_COUNT})")
 
         # Check 2: orphaned events never routed by Hub (M5 fix)
         orphaned = get_orphaned_events(hub)
