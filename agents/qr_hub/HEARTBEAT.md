@@ -1,7 +1,6 @@
-# HEARTBEAT.md — qr_hub (every 30 min)
+# HEARTBEAT.md — qr_hub
 
 ```
-schedule: */30 * * * *
 target:   agent:qr_hub:main
 message:  Routing cycle. Pull v_pending_events, route each per routing_rules, dedup via event_processing, fire sessions_send. Then run the 15-minute redispatch watchdog. See AGENTS.md for full SQL.
 ```

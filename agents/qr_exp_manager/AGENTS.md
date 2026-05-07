@@ -87,8 +87,7 @@ For each variant, mutate ONE parameter by ±10-25% (lookback_window, entry_thres
 
 | Failed gate | Mutation |
 |-------------|----------|
-| Gate 1 (risk rejected) | reduce position concept; add stop-loss param |
-| Gate 2 (low Sharpe OOS) | increase entry_threshold by +25% |
+| Gate 1 (risk rejected) | Parse `rejection_reason` for flags. If `concentration_risk`: strictly enforce `max_weight_per_ticker < 0.25`. If `low_trade_count`: loosen `entry_threshold` or `lookback_window` by 15-25% to increase signal frequency. You MUST output mathematically different parameter values than the parent. || Gate 2 (low Sharpe OOS) | increase entry_threshold by +25% |
 | Gate 3 (high drawdown) | add stop-loss; reduce holding period |
 | Gate 4 (low trade count) | extend date_range by 1 year; lower entry_threshold |
 | Gate 5 (overfitting / IS-OOS divergence) | reduce lookback_window; remove one parameter |
@@ -101,7 +100,7 @@ SELECT 1 FROM openclaw_researcher.events
 WHERE  event_type = 'experiment.started'
   AND  domain = 'quant'
   AND  created_at > NOW() - INTERVAL '30 days'
-  AND  md5(payload_json->'param_set'::text) = md5(:canonical_param_set::text)
+  AND  payload_json->'param_set' = :param_set::jsonb
 LIMIT 1;
 ```
 
@@ -228,3 +227,12 @@ VALUES ('weekly_summary_complete', 'qr_exp_manager', :summary::jsonb);
 - `skills/experiment_design.md` — variant generation rules + directed-mutation table
 - `skills/strategy_registry.md` — for fallback random seeding + canonical strategy_type names
 - `skills/lineage_and_promotion.md` — to understand which lineage rows are eligible for nightly seeding
+
+### FINAL STEP: THE WAKE-UP PING
+Immediately after you successfully execute an `INSERT INTO openclaw_researcher.events` statement, you MUST explicitly invoke your `sessions_send` tool to wake up the Hub so it can route your new event.
+
+Execute this exactly:
+sessions_send(
+  session_key = "agent:qr_hub:main",
+  message     = "NEW_EVENT: I have placed a new event in the database. Wake up and poll v_pending_events immediately."
+)

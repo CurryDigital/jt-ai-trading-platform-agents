@@ -19,7 +19,9 @@ _Cleansed on 2026-04-11. Ready for new batch._
 Status: Hub will pick them up on next 5-minute heartbeat.
 
 ---
-## Batch Run: 2026-04-13
+## Daily Learnings Summary: 2026-04-29
+No new learnings since last check. `.learnings/` directory absent; no parsing corrections or operator shorthand logged since 2026-04-11 cleanse.
+No new learnings since last check. `.learnings/` directory absent; no parsing corrections or operator shorthand logged since 2026-04-11 cleanse.
 10 hypotheses initialized in pipeline:
 1. vol_term_structure_VIX_SPY_2026 — pending
 2. precious_metals_reversion_GC_SI_2026 — pending

@@ -29,7 +29,8 @@ agents/*/.requests/
 # Ignore node_modules (if any JS projects)
 node_modules/
 
-# Ignore local env files (except the one we're using for token)
+# Ignore all .env files (absolute — already tracked files need git rm --cached)
+.env
 .env.local
 .env.*.local
 

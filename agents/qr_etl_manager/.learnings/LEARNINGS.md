@@ -31,6 +31,7 @@ _None logged yet._
 
 _None logged yet._
 
+<!-- REVIEWED: 2026-04-28 09:09 UTC — Daily learning summary completed -->
 [2026-04-22 01:39 UTC] ETL Coverage Gap: Strategies Tab APIs vs Pipeline
 - **Context**: Operator asked if strategies tab APIs are covered by ETL refreshing pipelines. Reviewed all API endpoints and ETL scripts.
 - **Discovery**:

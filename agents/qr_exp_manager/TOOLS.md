@@ -56,7 +56,6 @@ from agents.shared.constants import (
 
 ## Denied
 
-- No `sessions_send` (hub-only).
 - No write to `strategy_lineage` (qr_qa only).
 - No direct operator messaging — Phase C emits `etl.operator_alert` and qr_idea_intake delivers.
 - No bypass of flood control. Generating into an over-capacity pipeline produces stuck workflows, not progress.

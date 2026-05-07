@@ -171,3 +171,12 @@ Log: `BACKTESTED {strategy_id}: sharpe_oos={sharpe_oos:.2f} dd={max_drawdown:.2%
 - `skills/backtest_engine.md`
 - `skills/strategy_registry.md`
 - `skills/observability.md`
+
+### FINAL STEP: THE WAKE-UP PING
+Immediately after you successfully execute an `INSERT INTO openclaw_researcher.events` statement, you MUST explicitly invoke your `sessions_send` tool to wake up the Hub so it can route your new event.
+
+Execute this exactly:
+sessions_send(
+  session_key = "agent:qr_hub:main",
+  message     = "NEW_EVENT: I have placed a new event in the database. Wake up and poll v_pending_events immediately."
+)
