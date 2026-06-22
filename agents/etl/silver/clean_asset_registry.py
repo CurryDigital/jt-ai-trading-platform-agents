@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Silver Transform: Asset Registry
@@ -5,7 +11,9 @@ Syncs gold.asset_registry → silver.asset_registry
 Ensures all active tickers have a canonical record.
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 

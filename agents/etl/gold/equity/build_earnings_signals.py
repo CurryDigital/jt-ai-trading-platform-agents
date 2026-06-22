@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Gold Equity: Earnings Signals
@@ -7,7 +13,9 @@ Writes to:  gold.earnings_signals, gold.earnings_data, gold.sue_scores
 Classifies earnings surprises and builds trade signal windows.
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 

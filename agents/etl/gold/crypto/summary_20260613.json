@@ -1,0 +1,29 @@
+{
+  "date": "20260613",
+  "source": "binance",
+  "bronze_rows": 1491,
+  "gold_rows": 1491,
+  "symbols": [
+    "ADAUSDT",
+    "ALGOUSDT",
+    "APTUSDT",
+    "ARBUSDT",
+    "ATOMUSDT",
+    "AVAXUSDT",
+    "BNBUSDT",
+    "BTCUSDT",
+    "DOGEUSDT",
+    "DOTUSDT",
+    "ETCUSDT",
+    "ETHUSDT",
+    "FILUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "NEARUSDT",
+    "SOLUSDT",
+    "UNIUSDT",
+    "XLMUSDT",
+    "XRPUSDT"
+  ],
+  "timestamp": "2026-06-13T00:22:25.968766"
+}

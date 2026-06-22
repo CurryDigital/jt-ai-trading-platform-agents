@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Gold FX: FX Metrics
@@ -34,6 +40,7 @@ WITH daily AS (
                               ORDER BY timestamp
                               ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS close
   FROM bronze.fx_prices
+  WHERE timestamp >= CURRENT_DATE - INTERVAL '14 days'
 ),
 deduped AS (
   SELECT DISTINCT ON (ticker, date) *

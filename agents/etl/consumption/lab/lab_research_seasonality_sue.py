@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Consumption: Lab Tab — Research Signals, Seasonality, SUE Scores
@@ -158,6 +164,11 @@ ON CONFLICT (ticker, report_date) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM gold.seasonality_patterns")
+    if cur.fetchone()[0] == 0:
+        print("⚠️ gold.seasonality_patterns empty — skipping")
+        conn.close()
+        return
 
     cur.execute(SEASONALITY_SQL)
     print(f"✅ consumption.research_seasonality_patterns — {cur.rowcount} rows upserted")

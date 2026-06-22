@@ -1,131 +1,164 @@
 #!/usr/bin/env python3
 """
-Bronze Ingestion: Interactive Brokers (IBKR)
+Bronze Ingestion: Interactive Brokers (IBKR) via TWS API (ib_insync)
 Tables:
   bronze.ibkr_fx_bars        — historical FX OHLC bars from IBKR
   bronze.ibkr_fx_ticks       — raw bid/ask tick stream
   bronze.ibkr_positions_live — live account positions snapshot
-Source: IBKR Client Portal Gateway (REST API on localhost:5000)
-Env:   IBKR_GATEWAY_URL  (default: https://localhost:5000)
-       IBKR_ACCOUNT      (default: reads from API)
+Source: IBKR TWS API (binary socket on port 4002)
+Env:   IBKR_GATEWAY_HOST  (default: 52.74.14.181)
+       IBKR_GATEWAY_PORT  (default: 4002)
 """
-import sys, os, json
+import sys, os
 sys.path.insert(0, 'shared/scripts')
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
+
+import asyncio
+
+# ib_insync/eventkit eagerly grabs the event loop at import time.
+# Python 3.14+ disallows get_event_loop() in non-main threads / before a loop exists.
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+from ib_insync import IB, Forex
 from db import get_connection
 from datetime import datetime, timezone
 
-try:
-    import requests
-    requests.packages.urllib3.disable_warnings()  # self-signed cert
-except ImportError:
-    print("⚠️  requests not installed — run: pip install requests")
-    sys.exit(1)
+IBKR_HOST = os.environ.get('IBKR_GATEWAY_HOST', '127.0.0.1')
+IBKR_PORT = int(os.environ.get('IBKR_GATEWAY_PORT', 14002))
+IBKR_CLIENT_ID = int(os.environ.get('IBKR_CLIENT_ID', 98))
 
-GATEWAY  = os.environ.get('IBKR_GATEWAY_URL', 'https://localhost:5000/v1/api')
-ACCOUNT  = os.environ.get('IBKR_ACCOUNT', '')
+FX_PAIRS = ['EURUSD', 'USDJPY', 'GBPUSD', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD']
 
-def gw_get(path: str, params: dict = None):
-    """GET from IBKR Client Portal Gateway."""
-    url = f"{GATEWAY}/{path.lstrip('/')}"
-    r   = requests.get(url, params=params, verify=False, timeout=15)
-    r.raise_for_status()
-    return r.json()
 
-def get_account_id() -> str:
-    global ACCOUNT
-    if ACCOUNT:
-        return ACCOUNT
+def get_ib():
+    """Connect to IBKR TWS/Gateway and return IB instance."""
+    ib = IB()
     try:
-        accts = gw_get('portfolio/accounts')
-        ACCOUNT = accts[0]['id']
-        return ACCOUNT
+        ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=10)
+        print(f"Connected to IBKR TWS API at {IBKR_HOST}:{IBKR_PORT}")
+        return ib
     except Exception as e:
-        print(f"⚠️  Could not get account ID: {e}")
-        return ''
+        print(f"⚠️  IBKR connection failed: {e}")
+        return None
+
 
 # ── Live Positions ────────────────────────────────────────────────────────────
 
 def ingest_positions_live():
-    conn = get_connection()
-    cur  = conn.cursor()
-    acct = get_account_id()
-    if not acct:
-        print("⚠️  No IBKR account — skipping ibkr_positions_live")
-        conn.close()
+    ib = get_ib()
+    if not ib:
+        print("⚠️  No IBKR connection — skipping ibkr_positions_live")
         return
 
+    account = ib.wrapper.accounts[0] if ib.wrapper.accounts else ''
+    positions = ib.positions(account) if account else ib.positions()
+    portfolio = ib.portfolio(account) if account else ib.portfolio()
+
+    portfolio_lookup = {}
+    for p in portfolio:
+        portfolio_lookup[p.contract.conId] = {
+            'market_price': p.marketPrice,
+            'market_value': p.marketValue,
+            'unrealized_pnl': p.unrealizedPNL,
+            'realized_pnl': p.realizedPNL,
+        }
+
+    conn = get_connection()
+    cur = conn.cursor()
     inserted = 0
-    try:
-        positions = gw_get(f'portfolio/{acct}/positions/0')
-        for pos in positions:
-            try:
-                ticker = pos.get('ticker') or pos.get('symbol') or pos.get('conid', '')
-                cur.execute("""
-                    INSERT INTO bronze.ibkr_positions_live
-                        (account, ticker, conid, asset_class,
-                         quantity, avg_cost, market_price, market_value,
-                         unrealized_pnl, unrealized_pnl_pct,
-                         currency, exchange, fetched_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
-                    ON CONFLICT (account, ticker) DO UPDATE SET
-                        quantity       = EXCLUDED.quantity,
-                        market_price   = EXCLUDED.market_price,
-                        market_value   = EXCLUDED.market_value,
-                        unrealized_pnl = EXCLUDED.unrealized_pnl,
-                        fetched_at     = NOW()
-                """, (
-                    acct,
-                    str(ticker),
-                    pos.get('conid'),
-                    pos.get('assetClass'),
-                    pos.get('position'),
-                    pos.get('avgCost'),
-                    pos.get('mktPrice'),
-                    pos.get('mktValue'),
-                    pos.get('unrealizedPnl'),
-                    pos.get('unrealizedPnlPercent'),
-                    pos.get('currency'),
-                    pos.get('listingExchange'),
-                ))
-                inserted += 1
-            except Exception as e:
-                print(f"    Position error: {e}")
-    except Exception as e:
-        print(f"  IBKR positions error: {e}")
+
+    for pos in positions:
+        contract = pos.contract
+        conid = contract.conId
+
+        if conid in portfolio_lookup:
+            pl = portfolio_lookup[conid]
+            market_price = pl['market_price'] or pos.avgCost
+            market_value = pl['market_value'] or (pos.position * market_price)
+            unrealized_pnl = pl['unrealized_pnl'] or 0
+        else:
+            ticker_obj = ib.reqMktData(contract, '', False, False)
+            ib.sleep(1)
+            market_price = ticker_obj.last or ticker_obj.close or ticker_obj.marketPrice() or pos.avgCost
+            market_value = pos.position * market_price if market_price else 0
+            unrealized_pnl = market_value - (pos.position * pos.avgCost) if pos.avgCost else 0
+            ib.cancelMktData(contract)
+
+        unrealized_pnl_pct = (unrealized_pnl / (pos.position * pos.avgCost) * 100) if pos.position and pos.avgCost else 0
+
+        try:
+            cur.execute("""
+                INSERT INTO bronze.ibkr_positions_live
+                    (account, ticker, conid, asset_class,
+                     quantity, avg_cost, market_price, market_value,
+                     unrealized_pnl, unrealized_pnl_pct,
+                     currency, exchange, fetched_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                ON CONFLICT (account, ticker) DO UPDATE SET
+                    quantity       = EXCLUDED.quantity,
+                    avg_cost       = EXCLUDED.avg_cost,
+                    market_price   = EXCLUDED.market_price,
+                    market_value   = EXCLUDED.market_value,
+                    unrealized_pnl = EXCLUDED.unrealized_pnl,
+                    unrealized_pnl_pct = EXCLUDED.unrealized_pnl_pct,
+                    fetched_at     = NOW()
+            """, (
+                account, contract.symbol, conid, contract.secType,
+                pos.position, pos.avgCost, market_price, market_value,
+                unrealized_pnl, unrealized_pnl_pct,
+                contract.currency, contract.exchange,
+            ))
+            inserted += 1
+        except Exception as e:
+            print(f"    Position error {contract.symbol}: {e}")
 
     conn.commit()
     conn.close()
+    ib.disconnect()
     print(f"✅ bronze.ibkr_positions_live — {inserted} rows upserted")
 
 
 # ── FX Bars ───────────────────────────────────────────────────────────────────
 
-FX_PAIRS = ['EURUSD', 'USDJPY', 'GBPUSD', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD']
-
-def ingest_fx_bars(bar_size: str = '1 day', period: str = '5 D'):
+def ingest_fx_bars(bar_size: str = '1 day', duration: str = '5 D'):
     """
-    Fetch OHLC bars for FX pairs via IBKR market data history.
+    Fetch OHLC bars for FX pairs via IBKR reqHistoricalData.
     bar_size: '1 day', '1 hour', '5 mins'
-    period:   '5 D', '1 M', '1 Y'
+    duration: '5 D', '1 M', '1 Y'
     """
+    ib = get_ib()
+    if not ib:
+        print("⚠️  No IBKR connection — skipping ibkr_fx_bars")
+        return
+
     conn = get_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
     inserted = 0
 
     for pair in FX_PAIRS:
         try:
-            # IBKR uses conid for FX pairs — simplified approach via /iserver/marketdata/history
-            # In production, resolve conid first with /iserver/secdef/search
-            data = gw_get('iserver/marketdata/history', {
-                'conid': pair,   # placeholder — replace with real conid
-                'period': period,
-                'bar': bar_size,
-            })
-            bars = data.get('data', [])
+            contract = Forex(pair)
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow='MIDPOINT',
+                useRTH=False,
+                formatDate=1
+            )
             for bar in bars:
-                ts = datetime.fromtimestamp(bar.get('t', 0) / 1000, tz=timezone.utc)
                 try:
+                    if isinstance(bar.date, datetime):
+                        ts = bar.date.replace(tzinfo=timezone.utc)
+                    else:
+                        # bar.date can be string 'YYYYMMDD' or 'YYYY-MM-DD'
+                        date_str = str(bar.date)
+                        if '-' in date_str:
+                            ts = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                        else:
+                            ts = datetime.strptime(date_str, '%Y%m%d').replace(tzinfo=timezone.utc)
                     cur.execute("""
                         INSERT INTO bronze.ibkr_fx_bars
                             (pair, bar_size, timestamp,
@@ -133,11 +166,12 @@ def ingest_fx_bars(bar_size: str = '1 day', period: str = '5 D'):
                              volume, ingested_at)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                         ON CONFLICT (pair, bar_size, timestamp) DO UPDATE SET
-                            close_bid = EXCLUDED.close_bid
+                            close_bid = EXCLUDED.close_bid,
+                            volume = EXCLUDED.volume
                     """, (
                         pair, bar_size, ts,
-                        bar.get('o'), bar.get('h'), bar.get('l'), bar.get('c'),
-                        bar.get('v'),
+                        bar.open, bar.high, bar.low, bar.close,
+                        bar.volume,
                     ))
                     inserted += 1
                 except Exception as e:
@@ -147,6 +181,7 @@ def ingest_fx_bars(bar_size: str = '1 day', period: str = '5 D'):
 
     conn.commit()
     conn.close()
+    ib.disconnect()
     print(f"✅ bronze.ibkr_fx_bars — {inserted} rows upserted")
 
 
@@ -154,39 +189,41 @@ def ingest_fx_bars(bar_size: str = '1 day', period: str = '5 D'):
 
 def ingest_fx_ticks():
     """Snapshot current bid/ask for FX pairs from live market data."""
+    ib = get_ib()
+    if not ib:
+        print("⚠️  No IBKR connection — skipping ibkr_fx_ticks")
+        return
+
     conn = get_connection()
-    cur  = conn.cursor()
+    cur = conn.cursor()
     inserted = 0
 
     for pair in FX_PAIRS:
         try:
-            data = gw_get('iserver/marketdata/snapshot', {
-                'conids': pair,
-                'fields': '31,84,86',  # 31=last, 84=bid, 86=ask
-            })
-            for item in data:
-                try:
-                    cur.execute("""
-                        INSERT INTO bronze.ibkr_fx_ticks
-                            (pair, timestamp, bid, ask, ingested_at)
-                        VALUES (%s, NOW(), %s, %s, NOW())
-                    """, (
-                        pair,
-                        item.get('84'),  # bid
-                        item.get('86'),  # ask
-                    ))
-                    inserted += 1
-                except Exception as e:
-                    print(f"    Tick error {pair}: {e}")
+            contract = Forex(pair)
+            ticker = ib.reqMktData(contract, '', False, False)
+            ib.sleep(2)
+            bid = ticker.bid
+            ask = ticker.ask
+            ib.cancelMktData(contract)
+
+            if bid is not None or ask is not None:
+                cur.execute("""
+                    INSERT INTO bronze.ibkr_fx_ticks
+                        (pair, timestamp, bid, ask, ingested_at)
+                    VALUES (%s, NOW(), %s, %s, NOW())
+                """, (pair, bid, ask))
+                inserted += 1
         except Exception as e:
             print(f"  FX tick error {pair}: {e}")
 
     conn.commit()
     conn.close()
+    ib.disconnect()
     print(f"✅ bronze.ibkr_fx_ticks — {inserted} rows upserted")
 
 
 if __name__ == "__main__":
     ingest_positions_live()
-    ingest_fx_bars()
+    # ingest_fx_bars()  # Disabled: paper account lacks FX historical data subscription
     ingest_fx_ticks()

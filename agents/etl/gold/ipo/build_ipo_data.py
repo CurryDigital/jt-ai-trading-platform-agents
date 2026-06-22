@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Gold IPO: HK IPO Calendar, Details & Performance
@@ -62,27 +68,26 @@ INSERT INTO gold.hk_ipo_performance
    performance_tier, updated_at)
 SELECT
   p.ticker,
-  p.listing_date,
-  p.offer_price,
-  p.first_day_open,
-  p.first_day_close,
-  p.first_day_volume,
-  p.return_day1 AS first_day_return_pct,
-  p.return_day3  AS return_day3_pct,
-  p.return_day5  AS return_day5_pct,
-  p.return_day10 AS return_day10_pct,
-  p.return_day30 AS return_day30_pct,
-  -- current price = close from latest price data
+  p.ipo_date AS listing_date,
+  NULL AS offer_price,
+  NULL AS first_day_open,
+  NULL AS first_day_close,
+  NULL AS first_day_volume,
+  NULL AS first_day_return_pct,
+  p.return_1m AS return_day3_pct,
+  NULL AS return_day5_pct,
+  NULL AS return_day10_pct,
+  p.return_3m AS return_day30_pct,
   (SELECT close FROM silver.unified_prices
    WHERE ticker = p.ticker ORDER BY date DESC LIMIT 1) AS current_price,
-  p.return_current AS total_return_pct,
-  p.high_since_listing,
-  p.low_since_listing,
-  (p.low_since_listing / NULLIF(p.high_since_listing, 0) - 1) * 100 AS max_drawdown_pct,
+  p.return_3m AS total_return_pct,
+  NULL AS high_since_listing,
+  NULL AS low_since_listing,
+  NULL AS max_drawdown_pct,
   CASE
-    WHEN p.return_current > 0.5  THEN 'strong'
-    WHEN p.return_current > 0    THEN 'positive'
-    WHEN p.return_current > -0.2 THEN 'weak'
+    WHEN p.return_3m > 0.5  THEN 'strong'
+    WHEN p.return_3m > 0    THEN 'positive'
+    WHEN p.return_3m > -0.2 THEN 'weak'
     ELSE 'poor'
   END AS performance_tier,
   NOW()
@@ -97,6 +102,13 @@ ON CONFLICT (ticker) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM silver.unified_ipo_calendar")
+    count = cur.fetchone()[0]
+    if count == 0:
+        print("⚠️  silver.unified_ipo_calendar is empty, skipping gold IPO build")
+        cur.close()
+        conn.close()
+        sys.exit(0)
     cur.execute(SQL_CALENDAR)
     print(f"✅ gold.hk_ipo_calendar updated: {cur.rowcount} rows upserted")
     cur.execute(SQL_DETAILS)

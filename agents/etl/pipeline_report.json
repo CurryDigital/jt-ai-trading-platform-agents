@@ -1,0 +1,148 @@
+{
+  "start": "2026-05-09T10:47:19.823538+00:00",
+  "stages": {
+    "bronze": [
+      {
+        "label": "yfinance",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/bronze/yfinance/ingest_yfinance.py\", line 16, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "binance",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/bronze/binance/ingest_binance.py\", line 17, in <module>\n    from dotenv import load_dotenv\nModuleNotFoundError: No module named 'dotenv'\n",
+        "rc": 1
+      },
+      {
+        "label": "fmp_holdings",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/bronze/fmp/ingest_fmp.py\", line 21, in <module>\n    from dotenv import load_dotenv\nModuleNotFoundError: No module named 'dotenv'\n",
+        "rc": 1
+      }
+    ],
+    "silver": [
+      {
+        "label": "clean_prices",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/silver/clean_prices.py\", line 17, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "clean_earnings",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/silver/clean_earnings.py\", line 17, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "tech_indicators",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/silver/compute_technical_indicators.py\", line 15, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "market_indices",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/silver/sync_market_indices.py\", line 13, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "asset_registry",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/silver/clean_asset_registry.py\", line 12, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      }
+    ],
+    "gold": [
+      {
+        "label": "equity_kpis",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/gold/equity/build_equity_kpis.py\", line 16, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "stock_metrics",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/gold/equity/build_stock_metrics.py\", line 15, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "stock_metrics_hist",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/gold/equity/build_stock_metrics_history.py\", line 15, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "earnings_signals",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/gold/equity/build_earnings_signals.py\", line 14, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "market_metrics",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/gold/market/build_market_metrics.py\", line 12, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "commodity_metrics",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/gold/commodity/build_commodity_metrics.py\", line 13, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      }
+    ],
+    "consumption": [
+      {
+        "label": "market_overview",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/consumption/market/market_overview.py\", line 18, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "stocks_overview",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/consumption/command/command_stocks_overview.py\", line 15, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "research_signals",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/consumption/lab/lab_research_signals.py\", line 15, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "strategy_scores",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/consumption/lab/lab_strategy_scores.py\", line 15, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      },
+      {
+        "label": "performance_results",
+        "status": "FAIL",
+        "stdout": "",
+        "stderr": "Traceback (most recent call last):\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/consumption/performance/performance_strategy_results.py\", line 15, in <module>\n    from db import get_connection\n  File \"/home/ubuntu/.hermes/profiles/etl-manager/home/trading-platform/agents/etl/shared/scripts/db.py\", line 8, in <module>\n    import psycopg2\nModuleNotFoundError: No module named 'psycopg2'\n",
+        "rc": 1
+      }
+    ]
+  },
+  "end": "2026-05-09T10:47:21.725784+00:00",
+  "duration_sec": 1.902246
+}

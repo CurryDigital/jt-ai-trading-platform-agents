@@ -8,7 +8,9 @@ Computes: SMA 20/50/200, EMA 12/26, RSI 14, MACD, Bollinger Bands,
           ATR 14, Stochastic K/D, ADX, PSAR, VWAP
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -19,6 +21,7 @@ WITH price_returns AS (
     LN(close / NULLIF(LAG(close) OVER (PARTITION BY ticker ORDER BY date), 0)) AS log_return
   FROM silver.unified_prices
   WHERE close > 0 AND close IS NOT NULL
+    AND date >= (SELECT MAX(date) - INTERVAL '30 days' FROM silver.unified_prices)
 )
 INSERT INTO silver.technical_indicators
   (ticker, date,

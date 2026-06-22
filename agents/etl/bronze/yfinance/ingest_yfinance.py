@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Bronze Ingestion: Yahoo Finance (yfinance)
@@ -7,9 +13,16 @@ Tables:
   bronze.earnings_calendar      — earnings dates, EPS estimates/actuals
   bronze.institutional_holdings — aggregate institutional ownership
 Source: yfinance Python library
+Chunked download for speed.
 """
-import sys, os, json
-sys.path.insert(0, 'shared/scripts')
+import sys, os, json, time
+try:
+    import pandas as pd
+except ImportError:
+    pass
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 from datetime import date, timedelta
@@ -20,6 +33,9 @@ except ImportError:
     print("⚠️  yfinance not installed — run: pip install yfinance")
     sys.exit(1)
 
+CHUNK_SIZE = 100
+SLEEP_BETWEEN_CHUNKS = 0.5
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def get_active_tickers(conn) -> list:
@@ -28,7 +44,7 @@ def get_active_tickers(conn) -> list:
         SELECT ticker FROM gold.asset_registry
         WHERE is_active = TRUE
           AND asset_class IN ('STOCK', 'ETF', 'INDEX')
-        ORDER BY ticker
+        ORDER BY market = 'US' DESC, market = 'HK' DESC, market = 'CN' DESC, market = 'SG' DESC, ticker
     """)
     return [r[0] for r in cur.fetchall()]
 
@@ -45,12 +61,45 @@ def get_commodity_tickers(conn) -> list:
         'ZW=F', 'ZS=F', 'ZC=F', 'KC=F', 'SB=F'
     ]
 
-# ── Equity / ETF Prices ───────────────────────────────────────────────────────
+def _upsert_prices(cur, ticker, df):
+    """Upsert a single ticker's price DataFrame. Returns inserted count."""
+    inserted = 0
+    for _, row in df.iterrows():
+        try:
+            cur.execute("""
+                INSERT INTO bronze.yf_prices
+                    (ticker, date, open, high, low, close, volume,
+                     adjusted_close, ingested_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (ticker, date) DO UPDATE SET
+                    close = EXCLUDED.close,
+                    volume = EXCLUDED.volume,
+                    adjusted_close = EXCLUDED.adjusted_close
+            """, (
+                ticker,
+                row['Date'].date() if hasattr(row['Date'], 'date') else row['Date'],
+                float(row['Open'])   if row['Open']   == row['Open'] else None,
+                float(row['High'])   if row['High']   == row['High'] else None,
+                float(row['Low'])    if row['Low']    == row['Low']  else None,
+                float(row['Close'])  if row['Close']  == row['Close'] else None,
+                int(row['Volume'])   if row['Volume'] == row['Volume'] else None,
+                float(row['Close'])  if row['Close']  == row['Close'] else None,
+            ))
+            inserted += 1
+        except Exception as e:
+            print(f"    Row error {ticker}: {e}")
+    return inserted
 
-def ingest_yf_prices(tickers: list = None, days_back: int = 10):
+# ── Equity / ETF Prices (chunked) ─────────────────────────────────────────────
+
+def ingest_yf_prices(tickers: list = None, days_back: int = 5, max_tickers: int = 300):
     conn = get_connection()
     if tickers is None:
         tickers = get_active_tickers(conn)
+        if max_tickers:
+            tickers = tickers[:max_tickers]
+    elif max_tickers:
+        tickers = tickers[:max_tickers]
 
     if not tickers:
         print("⚠️  No tickers to ingest")
@@ -58,75 +107,42 @@ def ingest_yf_prices(tickers: list = None, days_back: int = 10):
         return
 
     start = (date.today() - timedelta(days=days_back)).isoformat()
-    print(f"  Fetching {len(tickers)} tickers from {start}…")
-
-    data = yf.download(tickers, start=start, auto_adjust=True, progress=False)
+    print(f"  Fetching {len(tickers)} tickers from {start} in chunks of {CHUNK_SIZE}…")
 
     cur = conn.cursor()
     inserted = 0
+    failures = []
 
-    if len(tickers) == 1:
-        # Single ticker returns a simple DataFrame
-        ticker = tickers[0]
-        df = data.reset_index()
-        for _, row in df.iterrows():
-            try:
-                cur.execute("""
-                    INSERT INTO bronze.yf_prices
-                        (ticker, date, open, high, low, close, volume,
-                         adjusted_close, ingested_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (ticker, date) DO UPDATE SET
-                        close = EXCLUDED.close,
-                        volume = EXCLUDED.volume,
-                        adjusted_close = EXCLUDED.adjusted_close
-                """, (
-                    ticker,
-                    row['Date'].date(),
-                    float(row['Open'])   if row['Open']   == row['Open'] else None,
-                    float(row['High'])   if row['High']   == row['High'] else None,
-                    float(row['Low'])    if row['Low']    == row['Low']  else None,
-                    float(row['Close'])  if row['Close']  == row['Close'] else None,
-                    int(row['Volume'])   if row['Volume'] == row['Volume'] else None,
-                    float(row['Close'])  if row['Close']  == row['Close'] else None,
-                ))
-                inserted += 1
-            except Exception as e:
-                print(f"    Row error {ticker} {row.get('Date')}: {e}")
-    else:
-        # Multi-ticker returns MultiIndex columns
-        for ticker in tickers:
-            try:
-                df = data.xs(ticker, axis=1, level=1).reset_index()
-                for _, row in df.iterrows():
+    for i in range(0, len(tickers), CHUNK_SIZE):
+        chunk = tickers[i:i + CHUNK_SIZE]
+        try:
+            data = yf.download(chunk, start=start, auto_adjust=True, progress=False)
+            if len(chunk) == 1:
+                ticker = chunk[0]
+                df = data.reset_index()
+                inserted += _upsert_prices(cur, ticker, df)
+            else:
+                for ticker in chunk:
                     try:
-                        cur.execute("""
-                            INSERT INTO bronze.yf_prices
-                                (ticker, date, open, high, low, close, volume,
-                                 adjusted_close, ingested_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                            ON CONFLICT (ticker, date) DO UPDATE SET
-                                close = EXCLUDED.close,
-                                volume = EXCLUDED.volume
-                        """, (
-                            ticker,
-                            row['Date'].date(),
-                            float(row['Open'])  if row['Open']  == row['Open']  else None,
-                            float(row['High'])  if row['High']  == row['High']  else None,
-                            float(row['Low'])   if row['Low']   == row['Low']   else None,
-                            float(row['Close']) if row['Close'] == row['Close'] else None,
-                            int(row['Volume'])  if row['Volume'] == row['Volume'] else None,
-                            float(row['Close']) if row['Close'] == row['Close'] else None,
-                        ))
-                        inserted += 1
+                        df = data.xs(ticker, axis=1, level=1).reset_index()
+                        inserted += _upsert_prices(cur, ticker, df)
                     except Exception as e:
-                        print(f"    Row error {ticker}: {e}")
-            except Exception as e:
-                print(f"    Ticker error {ticker}: {e}")
+                        failures.append((ticker, str(e)))
+                        print(f"  Ticker error {ticker}: {e}")
+        except Exception as e:
+            failures.append((chunk[0] if chunk else 'unknown', str(e)))
+            print(f"  Chunk error starting {chunk[0]}: {e}")
+
+        if i + CHUNK_SIZE < len(tickers):
+            time.sleep(SLEEP_BETWEEN_CHUNKS)
 
     conn.commit()
     conn.close()
-    print(f"✅ bronze.yf_prices — {inserted} rows upserted")
+
+    if failures:
+        print(f"  ⚠️  {len(failures)} tickers failed (logged above)")
+    limit_note = f" (limited to {max_tickers} tickers)" if max_tickers else ""
+    print(f"✅ bronze.yf_prices — {inserted} rows upserted{limit_note}")
 
 
 # ── Commodity Futures ─────────────────────────────────────────────────────────
@@ -144,9 +160,9 @@ COMMODITY_META = {
     'SB=F': ('Sugar Futures',      'softs',     'ICE'),
 }
 
-def ingest_commodity_futures(days_back: int = 30):
+def ingest_commodity_futures(days_back: int = 7, max_tickers: int = 10):
     conn = get_connection()
-    tickers = get_commodity_tickers(conn)
+    tickers = get_commodity_tickers(conn)[:max_tickers]
     start   = (date.today() - timedelta(days=days_back)).isoformat()
 
     cur = conn.cursor()
@@ -155,10 +171,18 @@ def ingest_commodity_futures(days_back: int = 30):
     for ticker in tickers:
         try:
             data = yf.download(ticker, start=start, auto_adjust=True, progress=False)
+            # Flatten multi-level columns (e.g. ('Close','CL=F')) to single level
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
             meta = COMMODITY_META.get(ticker, (ticker, 'unknown', 'unknown'))
 
             for ts, row in data.iterrows():
                 try:
+                    open_val  = float(row['Open'])   if pd.notna(row['Open'])   else None
+                    high_val  = float(row['High'])   if pd.notna(row['High'])   else None
+                    low_val   = float(row['Low'])    if pd.notna(row['Low'])    else None
+                    close_val = float(row['Close'])  if pd.notna(row['Close'])  else None
+                    vol_val   = int(row['Volume'])   if pd.notna(row['Volume']) else None
                     cur.execute("""
                         INSERT INTO bronze.yf_commodity_futures
                             (ticker, name, category, exchange, date,
@@ -170,12 +194,7 @@ def ingest_commodity_futures(days_back: int = 30):
                     """, (
                         ticker, meta[0], meta[1], meta[2],
                         ts.date(),
-                        float(row['Open'])  if row['Open']  == row['Open']  else None,
-                        float(row['High'])  if row['High']  == row['High']  else None,
-                        float(row['Low'])   if row['Low']   == row['Low']   else None,
-                        float(row['Close']) if row['Close'] == row['Close'] else None,
-                        int(row['Volume'])  if row['Volume'] == row['Volume'] else None,
-                        float(row['Close']) if row['Close'] == row['Close'] else None,
+                        open_val, high_val, low_val, close_val, vol_val, close_val,
                     ))
                     inserted += 1
                 except Exception as e:
@@ -286,5 +305,5 @@ def ingest_institutional_holdings(tickers: list = None):
 if __name__ == "__main__":
     ingest_yf_prices()
     ingest_commodity_futures()
-    ingest_earnings_calendar()
-    ingest_institutional_holdings()
+    # ingest_earnings_calendar()      # deferred — too slow for 120s timeout
+    # ingest_institutional_holdings() # deferred — too slow for 120s timeout

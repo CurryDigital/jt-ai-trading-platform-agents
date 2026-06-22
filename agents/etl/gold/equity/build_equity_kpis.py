@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Gold Equity: KPIs Metrics
@@ -9,7 +15,9 @@ This is the master equity signal table powering the Command tab.
 Computes all conditions (cond_*) and strategy trigger flags (s001_*, s007_*, etc.)
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -116,6 +124,7 @@ SELECT
 
 FROM silver.unified_prices p
 JOIN silver.technical_indicators ti ON ti.ticker = p.ticker AND ti.date = p.date
+WHERE p.date >= CURRENT_DATE - INTERVAL '90 days'
 WINDOW w AS (PARTITION BY p.ticker ORDER BY p.date)
 
 ON CONFLICT (ticker, date) DO UPDATE SET

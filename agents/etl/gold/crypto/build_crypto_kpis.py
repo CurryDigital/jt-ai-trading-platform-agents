@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Gold Crypto: Crypto KPIs
@@ -38,6 +44,12 @@ WITH src AS (
   WHERE interval = '1d'
   GROUP BY ticker, DATE(timestamp)
 ),
+returns AS (
+  SELECT
+    ticker, date, open, high, low, close, volume,
+    LN(close / NULLIF(LAG(close) OVER (PARTITION BY ticker ORDER BY date), 0)) AS log_return
+  FROM src
+),
 indicators AS (
   SELECT
     ticker, date, open, high, low, close, volume,
@@ -46,8 +58,8 @@ indicators AS (
     LEAST(open, close) - low            AS lower_shadow,
     CASE WHEN close >= open THEN 'bullish' ELSE 'bearish' END AS candle_type,
     NULL::numeric AS atr_14,
-    STDDEV(LN(close / NULLIF(LAG(close) OVER w, 0))) OVER w20 * SQRT(252) AS volatility_20d,
-    STDDEV(LN(close / NULLIF(LAG(close) OVER w, 0))) OVER w7  * SQRT(365) AS volatility_7d,
+    STDDEV(log_return) OVER w20 * SQRT(252) AS volatility_20d,
+    STDDEV(log_return) OVER w7  * SQRT(365) AS volatility_7d,
     (high - low) / NULLIF(close, 0) * 100 AS daily_range_pct,
     AVG(close) OVER w5  AS sma_5,
     AVG(close) OVER w20 AS sma_20,
@@ -66,9 +78,8 @@ indicators AS (
       / NULLIF(4 * STDDEV(close) OVER w20, 0) AS bb_position,
     AVG(volume) OVER w20 AS volume_sma_20,
     volume::numeric / NULLIF(AVG(volume) OVER w20, 0) AS volume_ratio
-  FROM src
+  FROM returns
   WINDOW
-    w   AS (PARTITION BY ticker ORDER BY date),
     w5  AS (PARTITION BY ticker ORDER BY date ROWS BETWEEN  4 PRECEDING AND CURRENT ROW),
     w7  AS (PARTITION BY ticker ORDER BY date ROWS BETWEEN  6 PRECEDING AND CURRENT ROW),
     w12 AS (PARTITION BY ticker ORDER BY date ROWS BETWEEN 11 PRECEDING AND CURRENT ROW),
@@ -109,6 +120,17 @@ ON CONFLICT (ticker, date) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
+    # Check if target table exists
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_schema = 'gold' AND table_name = 'crypto_kpis'
+        );
+    """)
+    if not cur.fetchone()[0]:
+        print("⚠️  gold.crypto_kpis does not exist — skipping crypto KPI build")
+        conn.close()
+        return
     cur.execute(SQL_KPIS)
     print(f"✅ gold.crypto_kpis updated: {cur.rowcount} rows upserted")
     conn.commit()

@@ -1,0 +1,13 @@
+# Core data stack
+pandas>=2.0
+numpy>=1.24
+psycopg2-binary>=2.9
+requests>=2.31
+beautifulsoup4>=4.12
+yfinance>=0.2
+
+# ML / regime detection
+joblib>=1.3
+scikit-learn>=1.4
+hmmlearn>=0.3
+pandas-ta>=0.3

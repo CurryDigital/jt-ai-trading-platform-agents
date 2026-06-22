@@ -8,7 +8,9 @@ Writes to:  consumption.strategies_backtest_results
             consumption.ticker_scores
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -16,47 +18,30 @@ from db import get_connection
 
 BACKTEST_SQL = """
 INSERT INTO consumption.strategies_backtest_results
-    (strategy_id, ticker, period_start, period_end, total_days,
-     total_return_pct, annualized_return_pct, benchmark_return_pct, alpha_pct,
-     volatility_annual, sharpe_ratio, sortino_ratio, max_drawdown_pct, calmar_ratio,
-     total_trades, win_rate, profit_factor, avg_trade_return_pct,
-     avg_win_pct, avg_loss_pct, equity_curve_json, calculated_at,
-     asset_class, direction, time_horizon)
+    (strategy_id, asset_class,
+     sharpe_ratio, max_drawdown_pct, total_trades, win_rate,
+     sharpe_oos, returns_oos, max_drawdown_oos, trade_count_oos, win_rate_oos,
+     updated_at)
 SELECT
-    sb.strategy_id,
-    sb.ticker,
-    (CURRENT_DATE - INTERVAL '5 years')::date   AS period_start,
-    CURRENT_DATE                                AS period_end,
-    365 * 5                                     AS total_days,
-    sb.total_return * 100                       AS total_return_pct,
-    -- Annualised: (1 + total)^(1/5) - 1
-    ROUND(((1 + sb.total_return)^(1.0/5) - 1) * 100, 4) AS annualized_return_pct,
-    NULL::numeric                               AS benchmark_return_pct,
-    NULL::numeric                               AS alpha_pct,
-    NULL::numeric                               AS volatility_annual,
-    sb.sharpe_ratio,
-    NULL::numeric                               AS sortino_ratio,
-    sb.max_drawdown * 100                       AS max_drawdown_pct,
-    NULL::numeric                               AS calmar_ratio,
-    sb.num_trades,
+    sb.strategy_id::text,
+    NULL AS asset_class,
+    sb.sharpe AS sharpe_ratio,
+    ABS(sb.max_dd) * 100 AS max_drawdown_pct,
+    sb.n_trades AS total_trades,
     sb.win_rate,
-    sb.profit_factor,
-    sb.avg_trade_return * 100                   AS avg_trade_return_pct,
-    NULL::numeric                               AS avg_win_pct,
-    NULL::numeric                               AS avg_loss_pct,
-    NULL::jsonb                                 AS equity_curve_json,
-    NOW(),
-    sd.asset_class,
-    sd.direction,
-    sd.time_horizon
+    NULL AS sharpe_oos,
+    NULL AS returns_oos,
+    NULL AS max_drawdown_oos,
+    NULL AS trade_count_oos,
+    NULL AS win_rate_oos,
+    sb.run_date AS updated_at
 FROM gold.strategy_backtests sb
-LEFT JOIN gold.strategy_definitions sd ON sd.strategy_id = sb.strategy_id
-ON CONFLICT (strategy_id, ticker) DO UPDATE SET
+ON CONFLICT (id) DO UPDATE SET
     sharpe_ratio        = EXCLUDED.sharpe_ratio,
     max_drawdown_pct    = EXCLUDED.max_drawdown_pct,
     win_rate            = EXCLUDED.win_rate,
     total_trades        = EXCLUDED.total_trades,
-    calculated_at       = NOW();
+    updated_at          = EXCLUDED.updated_at;
 """
 
 # ── Dynamic Scores ────────────────────────────────────────────────────────────
@@ -71,13 +56,13 @@ SELECT
     -- Collect buy signals from criteria_met json
     COALESCE(
         (SELECT jsonb_agg(key)
-         FROM jsonb_each_text(sts.entry_criteria)
-         WHERE value::boolean = true), '[]'::jsonb
+         FROM jsonb_each_text(sts.criteria_met)
+         WHERE value::text = 'true'), '[]'::jsonb
     ) AS buy_signals,
     COALESCE(
         (SELECT jsonb_agg(key)
-         FROM jsonb_each_text(sts.exit_criteria)
-         WHERE value::boolean = true), '[]'::jsonb
+         FROM jsonb_each_text(sts.criteria_met)
+         WHERE value::text = 'false'), '[]'::jsonb
     ) AS sell_signals,
     -- Signal strength: score normalised 0-1
     ROUND(LEAST(sts.score / 100.0, 1.0), 3) AS signal_strength,
@@ -114,6 +99,11 @@ ON CONFLICT (ticker, strategy_id) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM gold.strategy_backtests")
+    if cur.fetchone()[0] == 0:
+        print("⚠️ gold.strategy_backtests empty — skipping")
+        conn.close()
+        return
 
     cur.execute(BACKTEST_SQL)
     print(f"✅ consumption.strategies_backtest_results — {cur.rowcount} rows upserted")

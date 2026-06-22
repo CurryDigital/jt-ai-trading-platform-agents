@@ -3,23 +3,26 @@
 import sys, os
 sys.path.insert(0, 'shared/scripts')
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
+
+import asyncio
+
+# ib_insync/eventkit eagerly grabs the event loop at import time.
+# Python 3.14+ disallows get_event_loop() in non-main threads / before a loop exists.
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+from ib_insync import IB, util
 from db import get_connection
 from datetime import datetime
 
-try:
-    from ib_insync import IB, util
-except ImportError:
-    print("⚠️  ib_insync not installed")
-    sys.exit(1)
-
-IBKR_HOST = os.environ.get('IBKR_HOST', '52.74.14.181')
-IBKR_PORT = int(os.environ.get('IBKR_PORT', 4002))
+IBKR_HOST = os.environ.get('IBKR_HOST', '127.0.0.1')
+IBKR_PORT = int(os.environ.get('IBKR_PORT', 14002))
 IBKR_CLIENT_ID = int(os.environ.get('IBKR_CLIENT_ID', 99))
 
-def fetch_positions_and_summary():
+async def fetch_positions_and_summary():
     ib = IB()
     try:
-        ib.connect(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=10)
+        await ib.connectAsync(IBKR_HOST, IBKR_PORT, clientId=IBKR_CLIENT_ID, timeout=10)
         print(f"Connected to {IBKR_HOST}:{IBKR_PORT}")
     except Exception as e:
         print(f"⚠️  IBKR connection failed: {e}")
@@ -53,7 +56,7 @@ def fetch_positions_and_summary():
             unrealized_pnl = pl['unrealized_pnl'] or 0
         else:
             ticker_obj = ib.reqMktData(contract, '', False, False)
-            ib.sleep(0.5)
+            await asyncio.sleep(2)
             market_price = ticker_obj.last or ticker_obj.close or ticker_obj.marketPrice() or pos.avgCost
             market_value = pos.position * market_price if market_price else 0
             unrealized_pnl = market_value - (pos.position * pos.avgCost) if pos.avgCost else 0
@@ -88,11 +91,14 @@ def fetch_positions_and_summary():
     return result, summary
 
 def write_positions(rows):
-    if not rows:
-        print("No positions to write")
-        return
     conn = get_connection()
     cur = conn.cursor()
+    if not rows:
+        print("No positions to write — clearing stale positions")
+        cur.execute("TRUNCATE bronze.ibkr_positions_live;")
+        conn.commit()
+        conn.close()
+        return
     inserted = 0
     for r in rows:
         try:
@@ -130,7 +136,6 @@ def write_account_summary(summary, positions_count):
     conn = get_connection()
     cur = conn.cursor()
     try:
-        # Upsert into a simple account summary table or log
         net_liq = summary.get('NetLiquidation_HKD') or summary.get('NetLiquidation_BASE') or 0
         cash_hkd = summary.get('CashBalance_HKD', 0)
         cash_usd = summary.get('CashBalance_USD', 0)
@@ -157,11 +162,14 @@ def write_account_summary(summary, positions_count):
     finally:
         conn.close()
 
-if __name__ == "__main__":
-    rows, summary = fetch_positions_and_summary()
+async def main():
+    rows, summary = await fetch_positions_and_summary()
     for r in rows:
         print(f"  {r['ticker']:8} {r['quantity']:>10.2f} @ {r['avg_cost']:<10.2f} mv={r['market_value']:>12.2f}")
     if summary:
         print(f"  Account summary: {summary}")
     write_positions(rows)
     write_account_summary(summary, len(rows))
+
+if __name__ == "__main__":
+    asyncio.run(main())

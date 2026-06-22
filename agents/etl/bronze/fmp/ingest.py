@@ -20,10 +20,17 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-load_dotenv('/home/ubuntu/.openclaw/.env')
+SCRIPT_DIR = Path(__file__).parent
+WORKSPACE = SCRIPT_DIR.parent.parent
+ENV_FILE = WORKSPACE.parent.parent / 'env' / 'etl.env'
+load_dotenv(ENV_FILE)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('fmp_bronze')
+
+# FMP API disabled — paid plan required
+logger.warning("FMP ingestion skipped: paid plan required (403 Forbidden)")
+sys.exit(0)
 
 # FMP Configuration
 FMP_API_KEY = os.getenv('FMP_API_KEY')
@@ -34,8 +41,8 @@ BASE_URL = 'https://financialmodelingprep.com/api/v3'
 DAILY_CALL_LIMIT = 250
 DAILY_BANDWIDTH_LIMIT_MB = 512
 
-BRONZE_DIR = Path('/home/ubuntu/.openclaw/workspace/quant_research/agents/etl/bronze/fmp')
-STATE_DIR = Path('/home/ubuntu/.openclaw/workspace/quant_research/agents/etl/.state')
+BRONZE_DIR = WORKSPACE / 'bronze' / 'fmp'
+STATE_DIR = WORKSPACE / '.state'
 
 # Core tickers to track (can be expanded)
 CORE_TICKERS = [
@@ -335,6 +342,7 @@ def main():
     
     # Write summary
     summary_path = BRONZE_DIR / date_str / 'ingestion_summary.json'
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     with open(summary_path, 'w') as f:
         json.dump({
             'date': date_str,

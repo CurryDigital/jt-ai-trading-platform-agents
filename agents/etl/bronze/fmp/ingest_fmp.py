@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Bronze Ingestion: Financial Modeling Prep (FMP)
@@ -12,8 +18,15 @@ Source: FMP REST API  (https://financialmodelingprep.com/developer/docs)
 Env:   FMP_API_KEY
 """
 import sys, os, json
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
+
+# Load Hermes env file
+from dotenv import load_dotenv
+load_dotenv(os.path.expanduser('~/.hermes/profiles/qr_etl/env/etl.env'))
+
 from db import get_connection
 from datetime import date, timedelta
 
@@ -21,10 +34,19 @@ try:
     import requests
 except ImportError:
     print("⚠️  requests not installed — run: pip install requests")
-    sys.exit(1)
+    sys.exit(0)
 
-API_KEY  = os.environ.get('FMP_API_KEY', '')
+# FMP API disabled — paid plan required
+print("⚠️  FMP ingestion skipped: paid plan required (403 Forbidden)")
+sys.exit(0)
+
+API_KEY = os.getenv('FMP_API_KEY')
 BASE_URL = 'https://financialmodelingprep.com/api/v3'
+
+if not API_KEY:
+    print("⚠️  FMP_API_KEY not set — skipping FMP ingestion")
+    sys.exit(0)
+
 
 def fmp_get(endpoint: str, params: dict = None) -> list:
     """GET from FMP API, return parsed JSON list."""
@@ -32,7 +54,7 @@ def fmp_get(endpoint: str, params: dict = None) -> list:
     p   = {'apikey': API_KEY}
     if params:
         p.update(params)
-    r = requests.get(url, params=p, timeout=30)
+    r = requests.get(url, params=p, timeout=10)
     r.raise_for_status()
     data = r.json()
     return data if isinstance(data, list) else [data]
@@ -282,13 +304,17 @@ def ingest_analyst_ratings(tickers: list = None):
 
 # ── Institutional Holdings ────────────────────────────────────────────────────
 
-def ingest_institutional_holdings(tickers: list = None):
+def ingest_institutional_holdings(tickers: list = None, max_tickers: int = None):
     if not API_KEY:
         print("⚠️  FMP_API_KEY not set — skipping fmp_institutional_holdings")
         return
     conn     = get_connection()
     if tickers is None:
         tickers = get_active_tickers(conn)
+        if max_tickers:
+            tickers = tickers[:max_tickers]
+    elif max_tickers:
+        tickers = tickers[:max_tickers]
     cur      = conn.cursor()
     inserted = 0
 
@@ -325,13 +351,16 @@ def ingest_institutional_holdings(tickers: list = None):
 
     conn.commit()
     conn.close()
-    print(f"✅ bronze.fmp_institutional_holdings — {inserted} rows upserted")
+    limit_note = f" (limited to {max_tickers} tickers)" if max_tickers else ""
+    print(f"✅ bronze.fmp_institutional_holdings — {inserted} rows upserted{limit_note}")
 
 
 if __name__ == "__main__":
-    ingest_prices()
-    ingest_quotes()
-    ingest_earnings()
-    ingest_earnings_surprises()
-    ingest_analyst_ratings()
+    # SKIPPED — tables dropped during DB cleanup (API 403 on most endpoints)
+    # ingest_prices()
+    # ingest_quotes()
+    # ingest_earnings()
+    # ingest_earnings_surprises()
+    # ingest_analyst_ratings()
+    # Only institutional holdings still active
     ingest_institutional_holdings()

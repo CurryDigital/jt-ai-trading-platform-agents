@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Consumption: Lab Tab — Research Signals, SUE Scores, Seasonality, Contrarian
@@ -8,7 +14,9 @@ Writes to:  consumption.research_sue_scores,
             consumption.research_contrarian_signals
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -102,8 +110,8 @@ WITH scored AS (
      CASE WHEN s.sue_decile >= 7 THEN 30 ELSE 0 END +
      CASE WHEN k.cond_above_sma200 THEN 20 ELSE 0 END +
      CASE WHEN k.cond_high_volume THEN 20 ELSE 0 END) AS score
-  FROM (SELECT DISTINCT ON (ticker) * FROM gold.kpis_metrics ORDER BY ticker, date DESC) k
-  LEFT JOIN (SELECT DISTINCT ON (ticker) * FROM gold.sue_scores ORDER BY ticker, report_date DESC) s
+  FROM (SELECT DISTINCT ON (ticker) * FROM gold.kpis_metrics WHERE date >= CURRENT_DATE - INTERVAL '60 days' ORDER BY ticker, date DESC) k
+  LEFT JOIN (SELECT DISTINCT ON (ticker) * FROM gold.sue_scores WHERE report_date >= CURRENT_DATE - INTERVAL '180 days' ORDER BY ticker, report_date DESC) s
         ON s.ticker = k.ticker
   WHERE k.rsi_14 < 40
 )
@@ -135,6 +143,11 @@ ON CONFLICT (ticker, signal_type) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM gold.sue_scores")
+    if cur.fetchone()[0] == 0:
+        print("⚠️ gold.sue_scores empty — skipping")
+        conn.close()
+        return
     cur.execute(SQL_SUE)
     print(f"✅ consumption.research_sue_scores: {cur.rowcount} rows upserted")
     cur.execute(SQL_SEASONALITY)

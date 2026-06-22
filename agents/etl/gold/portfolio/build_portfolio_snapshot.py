@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Gold Portfolio: Live Positions & Portfolio Snapshots
@@ -71,10 +77,23 @@ ON CONFLICT (snapshot_date, portfolio_type) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(SQL_SYNC_POSITIONS)
-    print(f"✅ gold.ibkr_positions_live synced: {cur.rowcount} rows upserted")
-    cur.execute(SQL_SNAPSHOT)
-    print(f"✅ gold.portfolio_snapshots updated: {cur.rowcount} rows upserted")
+    
+    # Check if target table exists
+    cur.execute("""
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_schema = 'gold' AND table_name = 'ibkr_positions_live'
+        );
+    """)
+    has_positions_table = cur.fetchone()[0]
+    
+    if has_positions_table:
+        cur.execute(SQL_SYNC_POSITIONS)
+        print(f"✅ gold.ibkr_positions_live synced: {cur.rowcount} rows upserted")
+        cur.execute(SQL_SNAPSHOT)
+        print(f"✅ gold.portfolio_snapshots updated: {cur.rowcount} rows upserted")
+    else:
+        print("⚠️  gold.ibkr_positions_live does not exist — skipping position sync")
     
     # Also sync account summary from bronze to gold
     cur.execute("""
@@ -93,63 +112,42 @@ def run():
     """)
     print(f"✅ gold.ibkr_account_summary synced: {cur.rowcount} rows upserted")
     
-    # Also sync account summary from gold to consumption for frontend
+    # Check if consumption table exists before writing
     cur.execute("""
-        INSERT INTO consumption.portfolio_positions_current
-            (strategy_name, ticker, name, asset_class, side, quantity,
-             avg_entry_price, current_price, market_value, unrealized_pnl, unrealized_pnl_pct,
-             days_held, status, weight_pct, portfolio_weight, entry_date, last_updated)
-        SELECT
-            'LIVE_IBKR_CASH' AS strategy_name,
-            'HKD' AS ticker,
-            'Cash HKD' AS name,
-            'CASH' AS asset_class,
-            'LONG' AS side,
-            1 AS quantity,
-            cash_hkd AS avg_entry_price,
-            cash_hkd AS current_price,
-            cash_hkd AS market_value,
-            0 AS unrealized_pnl,
-            0 AS unrealized_pnl_pct,
-            0 AS days_held,
-            'ACTIVE' AS status,
-            100.0 AS weight_pct,
-            100.0 AS portfolio_weight,
-            CURRENT_DATE AS entry_date,
-            NOW() AS last_updated
-        FROM gold.ibkr_account_summary
-        WHERE cash_hkd IS NOT NULL
-        ON CONFLICT DO NOTHING;
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables 
+            WHERE table_schema = 'consumption' AND table_name = 'portfolio_positions_current'
+        );
     """)
-    # Also sync account summary from gold to consumption for frontend
-    cur.execute("""
-        INSERT INTO consumption.portfolio_positions_current
-            (strategy_name, ticker, name, asset_class, side, quantity,
-             avg_entry_price, current_price, market_value, unrealized_pnl, unrealized_pnl_pct,
-             days_held, status, weight_pct, portfolio_weight, entry_date, last_updated)
-        SELECT
-            'LIVE_IBKR_CASH' AS strategy_name,
-            'HKD' AS ticker,
-            'Cash HKD' AS name,
-            'CASH' AS asset_class,
-            'LONG' AS side,
-            1 AS quantity,
-            cash_hkd AS avg_entry_price,
-            cash_hkd AS current_price,
-            cash_hkd AS market_value,
-            0 AS unrealized_pnl,
-            0 AS unrealized_pnl_pct,
-            0 AS days_held,
-            'ACTIVE' AS status,
-            100.0 AS weight_pct,
-            100.0 AS portfolio_weight,
-            CURRENT_DATE AS entry_date,
-            NOW() AS last_updated
-        FROM gold.ibkr_account_summary
-        WHERE cash_hkd IS NOT NULL
-        ON CONFLICT DO NOTHING;
-    """)
-    print(f"✅ Cash position synced to consumption: {cur.rowcount} rows")
+    has_cons_table = cur.fetchone()[0]
+    
+    if has_cons_table:
+        # Also sync account summary from gold to consumption for frontend
+        cur.execute("""
+            INSERT INTO consumption.portfolio_positions_current
+                (strategy_id, ticker, side, entry_date, entry_price, current_price,
+                 quantity, market_value, weight_pct, unrealized_pnl, realized_pnl, status, updated_at)
+            SELECT
+                'LIVE_IBKR_CASH' AS strategy_id,
+                'HKD' AS ticker,
+                'LONG' AS side,
+                CURRENT_DATE AS entry_date,
+                cash_hkd AS entry_price,
+                cash_hkd AS current_price,
+                1 AS quantity,
+                cash_hkd AS market_value,
+                100.0 AS weight_pct,
+                0 AS unrealized_pnl,
+                0 AS realized_pnl,
+                'ACTIVE' AS status,
+                NOW() AS updated_at
+            FROM gold.ibkr_account_summary
+            WHERE cash_hkd IS NOT NULL
+            ON CONFLICT DO NOTHING;
+        """)
+        print(f"✅ Cash position synced to consumption: {cur.rowcount} rows")
+    else:
+        print("⚠️  consumption.portfolio_positions_current does not exist — skipping consumption sync")
     
     conn.commit()
     conn.close()

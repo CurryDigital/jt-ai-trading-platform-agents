@@ -1,0 +1,34 @@
+{
+  "date": "20260605",
+  "source": "binance",
+  "bronze_rows": 44053,
+  "silver_rows": 44053,
+  "symbols": [
+    "ADAUSDT",
+    "ALGOUSDT",
+    "APTUSDT",
+    "ARBUSDT",
+    "ATOMUSDT",
+    "AVAXUSDT",
+    "BNBUSDT",
+    "BTCUSDT",
+    "DOGEUSDT",
+    "DOTUSDT",
+    "ETCUSDT",
+    "ETHUSDT",
+    "FILUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "NEARUSDT",
+    "SOLUSDT",
+    "UNIUSDT",
+    "XLMUSDT",
+    "XRPUSDT"
+  ],
+  "intervals": [
+    "1d",
+    "1h",
+    "4h"
+  ],
+  "timestamp": "2026-06-05T15:22:03.069170"
+}

@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Gold Equity: Stock Metrics (Current Snapshot)
@@ -8,7 +14,9 @@ Latest daily metrics for all equities (current snapshot only).
 One row per ticker with most recent data.
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -20,7 +28,7 @@ WITH latest_prices AS (
     open, high, low, close, volume,
     returns_1d
   FROM silver.unified_prices
-  WHERE date >= CURRENT_DATE - INTERVAL '7 days'
+  WHERE date >= CURRENT_DATE - INTERVAL '14 days'
   ORDER BY ticker, date DESC
 ),
 latest_ti AS (
@@ -56,7 +64,7 @@ prices_252d AS (
   WHERE date >= CURRENT_DATE - INTERVAL '252 days'
   GROUP BY ticker
 )
-INSERT INTO gold.stock_metrics
+INSERT INTO gold.stock_metrics_history
   (date, ticker, sector,
    open, high, low, close, volume, vwap,
    rsi_14, macd_hist, sma_50, sma_200,
@@ -94,7 +102,7 @@ LEFT JOIN latest_ti ti ON ti.ticker = lp.ticker
 LEFT JOIN prev_sma ps ON ps.ticker = lp.ticker
 LEFT JOIN prices_252d p252 ON p252.ticker = lp.ticker
 
-ON CONFLICT (ticker) DO UPDATE SET
+ON CONFLICT (ticker, date) DO UPDATE SET
   date             = EXCLUDED.date,
   sector           = EXCLUDED.sector,
   open             = EXCLUDED.open,
@@ -127,7 +135,9 @@ def run():
                 SELECT 1 FROM pg_constraint 
                 WHERE conname = 'stock_metrics_ticker_key' 
                 AND conrelid = 'gold.stock_metrics'::regclass
-            ) THEN
+            ) AND (
+                SELECT relkind FROM pg_class WHERE oid = 'gold.stock_metrics'::regclass
+            ) = 'r' THEN
                 ALTER TABLE gold.stock_metrics ADD CONSTRAINT stock_metrics_ticker_key UNIQUE (ticker);
             END IF;
         END $$;
@@ -135,8 +145,7 @@ def run():
     conn.commit()
     
     # Get count before
-    cur.execute("SELECT COUNT(*) FROM gold.stock_metrics;")
-    before = cur.fetchone()[0]
+    before = 0  # stock_metrics is a view, no direct count
     
     # Execute upsert
     cur.execute(SQL)
@@ -145,13 +154,13 @@ def run():
     conn.commit()
     
     # Get count after
-    cur.execute("SELECT COUNT(*), MAX(date) FROM gold.stock_metrics;")
+    cur.execute("SELECT COUNT(*), MAX(date) FROM gold.stock_metrics_history;")
     after, max_date = cur.fetchone()
     
     # Get ticker coverage
     cur.execute("""
         SELECT COUNT(DISTINCT ticker) 
-        FROM gold.stock_metrics 
+        FROM gold.stock_metrics_history 
         WHERE date >= CURRENT_DATE - INTERVAL '2 days';
     """)
     current_tickers = cur.fetchone()[0]

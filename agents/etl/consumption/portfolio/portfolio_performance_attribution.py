@@ -54,26 +54,23 @@ WITH strat_perf AS (
 )
 SELECT
     sp.strategy_id,
-    sd.name                    AS strategy_name,
+    sp.strategy_id   AS strategy_name,
     'PAPER'                    AS portfolio_type,
-    ROUND(
-        sd.assigned_capital / NULLIF(SUM(sd.assigned_capital) OVER (), 0) * 100
-    , 2)                       AS allocated_capital_pct,
+    NULL::numeric              AS allocated_capital_pct,
     NULL::numeric              AS contribution_pct,
     sp.total_return_pct        AS return_pct,
     sp.num_trades,
     sp.win_rate,
     sp.avg_trade_return_pct,
-    sb.max_drawdown * 100      AS max_drawdown_pct,
-    sb.sharpe_ratio,
+    sb.max_dd * 100      AS max_drawdown_pct,
+    sb.sharpe AS sharpe_ratio,
     NOW()
 FROM strat_perf sp
-LEFT JOIN gold.strategy_definitions sd ON sd.strategy_id = sp.strategy_id
 LEFT JOIN (
     SELECT DISTINCT ON (strategy_id)
-        strategy_id, max_drawdown, sharpe_ratio
+        strategy_id::varchar, max_dd, sharpe
     FROM gold.strategy_backtests
-    ORDER BY strategy_id, calculated_at DESC
+    ORDER BY strategy_id, run_date DESC
 ) sb ON sb.strategy_id = sp.strategy_id
 ON CONFLICT (strategy_id, portfolio_type) DO UPDATE SET
     return_pct            = EXCLUDED.return_pct,
@@ -87,6 +84,16 @@ ON CONFLICT (strategy_id, portfolio_type) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT to_regclass('gold.trade_executions')")
+    if cur.fetchone()[0] is None:
+        print("⚠️ gold.trade_executions does not exist — skipping")
+        conn.close()
+        return
+    cur.execute("SELECT COUNT(*) FROM gold.trade_executions")
+    if cur.fetchone()[0] == 0:
+        print("⚠️ gold.trade_executions empty — skipping")
+        conn.close()
+        return
 
     cur.execute(MONTHLY_RETURNS_SQL)
     print(f"✅ consumption.performance_monthly_returns — {cur.rowcount} rows upserted")

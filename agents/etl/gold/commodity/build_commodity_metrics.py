@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Gold Commodity: Commodity Metrics & Seasonality
@@ -6,7 +12,9 @@ Writes to:  gold.commodity_futures, gold.commodity_metrics,
             gold.commodity_seasonality, gold.seasonality_patterns
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -22,7 +30,7 @@ WITH returns_calc AS (
   SELECT
     ticker, name, category, exchange, date, open, high, low, close, volume,
     (close / NULLIF(LAG(close) OVER (PARTITION BY ticker ORDER BY date), 0) - 1) AS returns,
-    LN(close / NULLIF(LAG(close) OVER (PARTITION BY ticker ORDER BY date), 0)) AS log_returns
+    LN(GREATEST(close / NULLIF(LAG(close) OVER (PARTITION BY ticker ORDER BY date), 0), 1e-10)) AS log_returns
   FROM bronze.yf_commodity_futures
 ),
 with_indicators AS (

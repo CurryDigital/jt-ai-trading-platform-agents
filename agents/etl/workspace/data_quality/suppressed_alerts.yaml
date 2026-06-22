@@ -1,0 +1,13 @@
+# Suppressed Data Quality Alerts
+# Consumed by G3 HealthMonitor on startup
+# Append-only — do not remove entries, add new ones at the bottom
+
+- table: gold.regime_features
+  column: funding_z
+  suppressed_at: "2026-05-20"
+  reason: "backfilled via G6b — NULL edge cases corrected with full history recompute"
+
+- table: gold.regime_features
+  column: adx14
+  suppressed_at: "2026-05-20"
+  reason: "backfilled via G6d — 4 missing SPY OHLCV dates restored, ADX14 recomputed for 18 affected dates"

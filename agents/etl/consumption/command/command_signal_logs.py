@@ -11,16 +11,15 @@ from db import get_connection
 
 SQL_SIGNAL_LOGS = """
 INSERT INTO consumption.signal_logs
-  (strategy_id, ticker, signal_type, signal_criteria, confidence_score,
-   strategy_signal, triggered_at, created_at)
+  (strategy_id, ticker, signal_type, signal_criteria, confidence,
+   signal, logged_at)
 SELECT
-  sts.strategy_id,
+  sts.strategy_id::smallint,
   sts.ticker,
   sts.signal_action,
   sts.criteria_met::text,
-  sts.score,
-  sts.signal_action = 'BUY',
-  NOW(),
+  sts.score::double precision,
+  CASE WHEN sts.signal_action = 'BUY' THEN 1 ELSE 0 END,
   NOW()
 FROM gold.strategy_ticker_scores sts
 WHERE sts.signal_action IN ('BUY', 'SELL')
@@ -56,6 +55,11 @@ ON CONFLICT (timestamp, ticker) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM gold.hft_metrics")
+    if cur.fetchone()[0] == 0:
+        print("⚠️ gold.hft_metrics empty — skipping")
+        conn.close()
+        return
     cur.execute(SQL_SIGNAL_LOGS)
     print(f"✅ consumption.signal_logs: {cur.rowcount} rows inserted")
     cur.execute(SQL_HFT)

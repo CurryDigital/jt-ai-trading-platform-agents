@@ -17,8 +17,10 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv('/home/ubuntu/.openclaw/.env')
+SCRIPT_DIR = Path(__file__).parent
+WORKSPACE = SCRIPT_DIR.parent.parent
+ENV_FILE = WORKSPACE.parent.parent / 'env' / 'etl.env'
+load_dotenv(ENV_FILE)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('binance_bronze')
@@ -37,7 +39,7 @@ CRYPTO_PAIRS = [
 
 INTERVALS = ['1d', '4h', '1h']  # Daily, 4-hour, 1-hour candles
 
-BRONZE_DIR = Path('/home/ubuntu/.openclaw/workspace/quant_research/agents/etl/bronze/binance')
+BRONZE_DIR = WORKSPACE / 'bronze' / 'binance'
 
 
 def check_credentials():

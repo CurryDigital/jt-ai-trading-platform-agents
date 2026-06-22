@@ -11,7 +11,9 @@ Writes to:  consumption.markets_stocks_overview
             consumption.dashboard_opportunities_top
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -28,6 +30,7 @@ INSERT INTO consumption.markets_stocks_overview
 WITH latest_kpis AS (
     SELECT DISTINCT ON (ticker) *
     FROM gold.kpis_metrics
+    WHERE date >= CURRENT_DATE - INTERVAL '60 days'
     ORDER BY ticker, date DESC
 ),
 strategy_agg AS (
@@ -271,23 +274,26 @@ LIMIT 10;
 """
 
 def run():
+    import time
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM gold.kpis_metrics")
+    if cur.fetchone()[0] == 0:
+        print("⚠️ gold.kpis_metrics empty — skipping")
+        conn.close()
+        return
 
+    t0 = time.time()
     cur.execute(STOCKS_SQL)
-    print(f"✅ consumption.markets_stocks_overview — {cur.rowcount} rows upserted")
+    print(f"✅ consumption.markets_stocks_overview — {cur.rowcount} rows upserted ({time.time()-t0:.1f}s)")
 
+    t0 = time.time()
     cur.execute(COMMODITIES_SQL)
-    print(f"✅ consumption.markets_commodities_overview — {cur.rowcount} rows upserted")
+    print(f"✅ consumption.markets_commodities_overview — {cur.rowcount} rows upserted ({time.time()-t0:.1f}s)")
 
+    t0 = time.time()
     cur.execute(DASHBOARD_OVERVIEW_SQL)
-    print(f"✅ consumption.dashboard_market_overview — {cur.rowcount} rows upserted")
-
-    cur.execute(SUMMARY_CARDS_SQL)
-    print(f"✅ consumption.dashboard_summary_cards — {cur.rowcount} rows upserted")
-
-    cur.execute(OPPORTUNITIES_SQL)
-    print(f"✅ consumption.dashboard_opportunities_top — refreshed")
+    print(f"✅ consumption.dashboard_market_overview — {cur.rowcount} rows upserted ({time.time()-t0:.1f}s)")
 
     conn.commit()
     conn.close()

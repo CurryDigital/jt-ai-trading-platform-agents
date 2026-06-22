@@ -10,10 +10,11 @@ import os
 import sys
 import boto3
 import psycopg2
+from datetime import datetime
 
 STATE_FILE = os.path.join(
     os.path.dirname(__file__),
-    "../qr_etl_manager/.state.json"
+    ".state.json"
 )
 
 DB_HOST   = os.environ["DB_HOST"]
@@ -41,11 +42,17 @@ def get_password():
 
 def main():
     if not os.path.exists(STATE_FILE):
-        print(f"ERROR: state file not found: {STATE_FILE}")
-        sys.exit(1)
-
-    with open(STATE_FILE) as f:
-        state = json.load(f)
+        print(f"WARNING: state file not found: {STATE_FILE} — creating default fresh state")
+        state = {
+            "state": "fresh",
+            "sources_ok": [],
+            "sources_failed": [],
+            "locked_since": None,
+            "completed_at": datetime.utcnow().isoformat()
+        }
+    else:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
 
     db_state      = state.get("state", "stale")
     sources_ok    = json.dumps(state.get("sources_ok", []))

@@ -1,151 +1,278 @@
 #!/bin/bash
-# Daily Data Refresh Script - Medallion Architecture
-# Updated: 2026-03-21 - Added Binance crypto, removed Yahoo crypto
+# Daily Data Refresh Script — Medallion Architecture
+# Updated for Hermes shadow workspace
 # Runs: Bronze → Silver → Gold → Consumption
 
-set -e
+set -uo pipefail
 
-WORKSPACE="/home/ubuntu/.openclaw/workspace/quant_research"
-LOG_FILE="$WORKSPACE/agents/etl/logs/daily_refresh_$(date +%Y%m%d_%H%M%S).log"
-mkdir -p "$WORKSPACE/agents/etl/logs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE="${SCRIPT_DIR}"
+LOG_DIR="/tmp/etl_logs"
+LOG_FILE="${LOG_DIR}/daily_refresh_$(date +%Y%m%d_%H%M%S).log"
+mkdir -p "${LOG_DIR}"
 
-exec 1>>"$LOG_FILE" 2>&1
+exec 1>>"${LOG_FILE}" 2>&1
 
 echo "=========================================="
 echo "DAILY REFRESH STARTED: $(date)"
-echo "Workspace: $WORKSPACE"
+echo "Workspace: ${WORKSPACE}"
 echo "=========================================="
 
-export PYTHONPATH="$WORKSPACE:$PYTHONPATH"
+export PYTHONPATH="${WORKSPACE}/shared/scripts:${PYTHONPATH:-}"
 export AWS_REGION="ap-southeast-1"
 
-# Load environment variables
-set -a && source ~/.openclaw/.env && set +a
+# Load environment variables from Hermes-managed env file
+ENV_FILE="/home/ubuntu/.hermes/profiles/qr_etl/env/etl.env"
+if [ -f "${ENV_FILE}" ]; then
+    set -a && source "${ENV_FILE}" && set +a
+    echo "Loaded env from ${ENV_FILE}"
+else
+    echo "WARNING: Env file not found at ${ENV_FILE}"
+fi
 
-# Ensure packages are installed
-echo "Checking Python dependencies..."
-pip3 install --break-system-packages pandas yfinance requests python-dotenv 2>/dev/null || true
+# Use Hermes venv Python
+PYTHON="/home/ubuntu/.hermes/hermes-agent/venv/bin/python3"
+if [ ! -f "${PYTHON}" ]; then
+    PYTHON="python3"
+fi
 
-cd "$WORKSPACE/agents/etl"
+cd "${WORKSPACE}"
 
-# ─────────────────────────────────────────────
+# Failure tracking arrays
+FAILED_BRONZE=()
+FAILED_SILVER=()
+FAILED_GOLD=()
+FAILED_CONSUMPTION=()
+
+# Per-script timeout (seconds)
+BRONZE_TIMEOUT=120
+SILVER_TIMEOUT=120
+GOLD_TIMEOUT=180
+CONSUMPTION_TIMEOUT=30
+
+run_bronze() {
+    local name="$1"
+    local script="$2"
+    shift 2
+    echo "→ ${name}..."
+    if timeout ${BRONZE_TIMEOUT}s "${PYTHON}" "${script}" "$@"; then
+        echo "  ✅ ${name} complete"
+    else
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            echo "  ⏱️ ${name} TIMEOUT after ${BRONZE_TIMEOUT}s"
+        else
+            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
+        fi
+        FAILED_BRONZE+=("${name}")
+    fi
+}
+
+run_silver() {
+    local name="$1"
+    local script="$2"
+    echo "→ ${name}..."
+    if timeout ${SILVER_TIMEOUT}s "${PYTHON}" "${script}"; then
+        echo "  ✅ ${name} complete"
+    else
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            echo "  ⏱️ ${name} TIMEOUT after ${SILVER_TIMEOUT}s"
+        else
+            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
+        fi
+        FAILED_SILVER+=("${name}")
+    fi
+}
+
+run_gold() {
+    local name="$1"
+    local script="$2"
+    echo "→ ${name}..."
+    if timeout ${GOLD_TIMEOUT}s "${PYTHON}" "${script}"; then
+        echo "  ✅ ${name} complete"
+    else
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            echo "  ⏱️ ${name} TIMEOUT after ${GOLD_TIMEOUT}s"
+        else
+            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
+        fi
+        FAILED_GOLD+=("${name}")
+    fi
+}
+
+run_consumption() {
+    local name="$1"
+    local script="$2"
+    echo "→ ${name}..."
+    if timeout ${CONSUMPTION_TIMEOUT}s "${PYTHON}" "${script}"; then
+        echo "  ✅ ${name} complete"
+    else
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            echo "  ⏱️ ${name} TIMEOUT after ${CONSUMPTION_TIMEOUT}s"
+        else
+            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
+        fi
+        FAILED_CONSUMPTION+=("${name}")
+    fi
+}
+
+# ════════════════════════════════════════════
 echo ""
 echo "🔶 BRONZE — Raw Ingestion (by Source System)"
 echo "------------------------------------------"
 
-# Binance (crypto) - PRIMARY crypto source
-echo "→ Binance (crypto)..."
-if [ -f "bronze/binance/crypto_ingest.py" ]; then
-    python3 bronze/binance/crypto_ingest.py || echo "⚠️ Binance crypto failed"
-fi
-
-# NOTE: Coinbase disabled - using Binance as primary crypto source
-# Coinbase remains available in bronze/coinbase/ if needed in future
-# Reasons: JWT auth complexity, lower rate limits vs Binance
+# Binance (crypto) — daily klines
+run_bronze "Binance crypto" "shared/scripts/ingest_binance_crypto.py" "1d"
 
 # FMP (equities/fundamentals)
-echo "→ FMP..."
 for f in bronze/fmp/*.py; do
-  [ -f "$f" ] && python3 "$f" || true
+    if [ -f "$f" ]; then
+        run_bronze "FMP:$(basename "$f" .py)" "$f"
+    fi
 done
 
 # Interactive Brokers (positions/portfolio + live TWS sync)
-echo "→ IBKR..."
-for f in bronze/ibkr/*.py; do
-  [ -f "$f" ] && python3 "$f" || true
-done
-
-# Live TWS position sync (ib_insync)
-echo "→ IBKR TWS live sync..."
-if [ -f "bronze/ibkr/ingest_ibkr_tws.py" ]; then
-    python3 bronze/ibkr/ingest_ibkr_tws.py || echo "⚠️ IBKR TWS sync failed"
+# Runs on EC2 gateway directly to avoid IP mismatch with TWS session
+echo "Running IBKR ingestion on EC2 gateway..."
+ssh -i ~/.ssh/ibkr_ec2.pem -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@52.74.14.181 '~/run_ibkr_etl.sh' 2>&1 | while read line; do echo "  [EC2] $line"; done
+IBKR_EC2_EXIT=${PIPESTATUS[0]}
+if [ $IBKR_EC2_EXIT -ne 0 ]; then
+    FAILED_BRONZE+=("IBKR:EC2_runner")
+    echo "  ⚠️ IBKR EC2 runner failed (exit $IBKR_EC2_EXIT)"
 fi
 
+# Keep local IBKR scripts as fallback (disabled - EC2 runner handles all IBKR data)
+# for f in bronze/ibkr/*.py; do
+#     if [ -f "$f" ]; then
+#         run_bronze "IBKR:$(basename "$f" .py)" "$f"
+#     fi
+# done
+
 # HKEX (Hong Kong equities)
-echo "→ HKEX..."
 for f in bronze/hkex/*.py; do
-  [ -f "$f" ] && python3 "$f" || true
+    if [ -f "$f" ]; then
+        run_bronze "HKEX:$(basename "$f" .py)" "$f"
+    fi
 done
 
-# Yahoo Finance (equities only - NO CRYPTO)
-echo "→ Yahoo Finance (equities only)..."
+# Yahoo Finance (equities only — NO CRYPTO)
 for f in bronze/yfinance/*.py; do
-  # Skip any crypto-related yfinance scripts
-  if [[ "$f" != *"crypto"* ]]; then
-    [ -f "$f" ] && python3 "$f" || true
-  fi
+    if [ -f "$f" ]; then
+        run_bronze "YF:$(basename "$f" .py)" "$f"
+    fi
+done
+
+# FRED (macro indicators)
+for f in bronze/fred/*.py; do
+    if [ -f "$f" ]; then
+        run_bronze "FRED:$(basename "$f" .py)" "$f"
+    fi
 done
 
 # Manual uploads
-echo "→ Manual uploads..."
 for f in bronze/manual/*.py; do
-  [ -f "$f" ] && python3 "$f" || true
+    if [ -f "$f" ]; then
+        run_bronze "MANUAL:$(basename "$f" .py)" "$f"
+    fi
 done
 
-echo "✅ Bronze complete"
+if [ ${#FAILED_BRONZE[@]} -gt 0 ]; then
+    echo "⚠️ Bronze failures: ${FAILED_BRONZE[*]}"
+fi
 
-# ─────────────────────────────────────────────
+echo "✅ Bronze complete (${#FAILED_BRONZE[@]} failures)"
+
+# ════════════════════════════════════════════
 echo ""
 echo "🔷 SILVER — Clean & Normalize"
 echo "------------------------------------------"
 
 # Crypto normalization (from Binance)
-echo "→ Crypto (Binance source)..."
-if [ -f "silver/crypto_normalize.py" ]; then
-    python3 silver/crypto_normalize.py || echo "⚠️ Crypto silver failed"
+run_silver "Crypto normalize" "silver/crypto_normalize.py"
+
+# All silver scripts
+for f in silver/*.py; do
+    if [ -f "$f" ]; then
+        run_silver "$(basename "$f" .py)" "$f"
+    fi
+done
+
+# IBKR silver promotion (from EC2 bronze data)
+run_silver "IBKR promote" "silver/promote_ibkr.py"
+run_silver "IBKR orders promote" "silver/promote_ibkr_orders.py"
+
+if [ ${#FAILED_SILVER[@]} -gt 0 ]; then
+    echo "⚠️ Silver failures: ${FAILED_SILVER[*]}"
 fi
 
-# Other silver scripts
-for f in silver/*.py; do
-  [ -f "$f" ] && python3 "$f" || true
-done
-echo "✅ Silver complete"
+echo "✅ Silver complete (${#FAILED_SILVER[@]} failures)"
 
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════
 echo ""
 echo "🥇 GOLD — Curate by Asset Type"
 echo "------------------------------------------"
 
-# Crypto metrics (from Binance)
-echo "→ Crypto metrics..."
-if [ -f "gold/crypto/crypto_metrics.py" ]; then
-    python3 gold/crypto/crypto_metrics.py || echo "⚠️ Crypto gold failed"
-fi
+# Crypto metrics
+run_gold "Crypto KPIs" "gold/crypto/crypto_metrics.py"
+run_gold "Crypto metrics build" "gold/crypto/build_crypto_kpis.py"
 
-# Other asset types
-for asset in equity fx commodity market portfolio ipo; do
-  if [ -d "gold/$asset" ]; then
-    echo "→ $asset..."
-    for f in gold/$asset/*.py; do
-      [ -f "$f" ] && python3 "$f" || true
-    done
-  fi
+# All asset types
+for asset in equity fx commodity market portfolio ipo strategy; do
+    if [ -d "gold/${asset}" ]; then
+        for f in gold/${asset}/*.py; do
+            if [ -f "$f" ]; then
+                run_gold "${asset}:$(basename "$f" .py)" "$f"
+            fi
+        done
+    fi
 done
 
-# Portfolio positions: sync bronze → gold
-echo "→ Portfolio positions (bronze→gold)..."
-if [ -f "gold/portfolio/build_portfolio_snapshot.py" ]; then
-    python3 gold/portfolio/build_portfolio_snapshot.py || echo "⚠️ Portfolio snapshot failed"
+# IBKR gold promotion (from silver data)
+run_gold "IBKR promote" "gold/promote_ibkr.py"
+run_gold "IBKR orders promote" "gold/promote_ibkr_orders.py"
+
+# S9 MACD signal generation
+run_gold "S9 MACD signals" "gold/strategy/s9_macd_daily.py"
+
+if [ ${#FAILED_GOLD[@]} -gt 0 ]; then
+    echo "⚠️ Gold failures: ${FAILED_GOLD[*]}"
 fi
 
-echo "✅ Gold complete"
+echo "✅ Gold complete (${#FAILED_GOLD[@]} failures)"
 
-# ─────────────────────────────────────────────
+# ════════════════════════════════════════════
 echo ""
 echo "📊 CONSUMPTION — Serve by Frontend Tab"
 echo "------------------------------------------"
 for tab in command lab performance portfolio market; do
-  if [ -d "consumption/$tab" ]; then
-    for f in consumption/$tab/*.py; do
-      [ -f "$f" ] && python3 "$f" || true
-    done
-  fi
+    if [ -d "consumption/${tab}" ]; then
+        for f in consumption/${tab}/*.py; do
+            if [ -f "$f" ]; then
+                run_consumption "${tab}:$(basename "$f" .py)" "$f"
+            fi
+        done
+    fi
 done
-echo "✅ Consumption complete"
 
+if [ ${#FAILED_CONSUMPTION[@]} -gt 0 ]; then
+    echo "⚠️ Consumption failures: ${FAILED_CONSUMPTION[*]}"
+fi
+
+echo "✅ Consumption complete (${#FAILED_CONSUMPTION[@]} failures)"
+
+# ════════════════════════════════════════════
 echo ""
 echo "=========================================="
-python3 "$WORKSPACE/agents/etl/sync_gold_layer_state.py" && echo "✅ gold_layer_state synced to DB"
+"${PYTHON}" "${WORKSPACE}/sync_gold_layer_state.py" && echo "✅ gold_layer_state synced to DB" || echo "⚠️ sync_gold_layer_state FAILED"
+
+TOTAL_FAILS=$(( ${#FAILED_BRONZE[@]} + ${#FAILED_SILVER[@]} + ${#FAILED_GOLD[@]} + ${#FAILED_CONSUMPTION[@]} ))
 echo "DAILY REFRESH COMPLETED: $(date)"
-echo "Log: $LOG_FILE"
+echo "Total failures: ${TOTAL_FAILS} (Bronze:${#FAILED_BRONZE[@]} Silver:${#FAILED_SILVER[@]} Gold:${#FAILED_GOLD[@]} Consumption:${#FAILED_CONSUMPTION[@]})"
+echo "Log: ${LOG_FILE}"
 echo "=========================================="
+
+# Exit non-zero if any stage failed
+exit ${TOTAL_FAILS}

@@ -8,7 +8,9 @@ Writes to:  consumption.markets_stocks_overview,
             consumption.dashboard_summary_cards
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -132,10 +134,18 @@ ON CONFLICT (card_key) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT to_regclass('gold.strategy_definitions')")
+    if cur.fetchone()[0] is None:
+        print("⚠️ gold.strategy_definitions does not exist — skipping")
+        conn.close()
+        return
+    cur.execute("SELECT COUNT(*) FROM gold.strategy_definitions")
+    if cur.fetchone()[0] == 0:
+        print("⚠️ gold.strategy_definitions empty — skipping")
+        conn.close()
+        return
     cur.execute(SQL_STOCKS)
     print(f"✅ consumption.markets_stocks_overview: {cur.rowcount} rows upserted")
-    cur.execute(SQL_OPPORTUNITIES)
-    print(f"✅ consumption.dashboard_opportunities_top: refreshed")
     cur.execute(SQL_SUMMARY)
     print(f"✅ consumption.dashboard_summary_cards: {cur.rowcount} rows upserted")
     conn.commit()

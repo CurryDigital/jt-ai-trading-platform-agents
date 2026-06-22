@@ -1,135 +1,144 @@
-# ETL Pipeline for Quant Research
+# qr_etl — Regime Detection Engine
 
-## Recent Changes (2026-03-21)
+## What this does
 
-### Crypto Data Source Migration: Yahoo Finance → Binance
+A 4-stage ETL pipeline that ingests market data, trains a 3-state Gaussian Hidden Markov Model on regime features, and produces a single daily regime label (`gold.regime_label`) that routes 20 trading strategies into one of five regimes: TREND, MEAN_REV, CARRY, EVENT, or FLAT.
 
-**What changed:**
-- **Before:** Crypto data came from Yahoo Finance via `yfinance` (equities API repurposed for crypto)
-- **After:** Crypto data now comes directly from **Binance API** (native crypto exchange)
+## Prerequisites
 
-**New files created:**
-
-| Layer | Script | Purpose |
-|-------|--------|---------|
-| Bronze | `bronze/binance/crypto_ingest.py` | Pulls OHLCV data from Binance for 15 major pairs |
-| Silver | `silver/crypto_normalize.py` | Normalizes raw Binance data, adds returns/volatility/VWAP |
-| Gold | `gold/crypto/crypto_metrics.py` | Curates crypto metrics (RSI, MACD, Bollinger, Sharpe) |
-
-**Data flow:**
-```
-Binance API
-    ↓
-bronze/binance/ (raw candlesticks)
-    ↓
-silver/crypto/ (normalized + derived metrics)
-    ↓
-gold/crypto/ (curated metrics matching stock schema)
-    ↓
-stock_metrics_history (unified table)
-```
-
-**Supported pairs:**
-BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, ADAUSDT, AVAXUSDT, DOTUSDT, MATICUSDT, LINKUSDT, UNIUSDT, LTCUSDT, ATOMUSDT, ETCUSDT, XLMUSDT
-
-**Intervals:** 1d (daily), 4h, 1h
-
-**Requirements:**
-```bash
-# Add to ~/.openclaw/.env
-BINANCE_API_KEY=your_actual_api_key
-BINANCE_SECRET=your_actual_secret
-```
-
-### Coinbase: Disabled (Binance Primary)
-
-**Status:** ❌ Disabled — Using Binance as primary crypto source
-
-**Why Binance over Coinbase:**
-| Factor | Binance | Coinbase |
-|--------|---------|----------|
-| Rate limits | 1,200/min | 10/sec |
-| Trading pairs | 1,500+ | ~250 |
-| Auth complexity | HMAC (simple) | JWT (complex) |
-| API maturity | Mature | Newer (Advanced Trade) |
-
-**When to reactivate Coinbase:**
-- US regulatory compliance required
-- Binance data quality issues
-- Need native USD pairs (not USDT)
-
-**File:** `bronze/coinbase/crypto_ingest.py` (placeholder, ready if needed)
-
-### FMP (Financial Modeling Prep) Activation
-
-**What changed:**
-- **New:** FMP API now active for equity fundamentals and historical prices
-- **Limits:** 250 API calls/day, 512 MB/month bandwidth
-- **Strategy:** Smart incremental backfill to stay within limits
-
-**Features:**
-- **Rate limiting:** Tracks API usage per day, stops before hitting limits
-- **Incremental backfill:** Only fetches new data since last successful fetch
-- **Priority queue:** 
-  1. Real-time quotes (all 36 core tickers, batched)
-  2. Historical prices (top 10 tickers, incremental)
-  3. Fundamentals (top 5 tickers, if budget permits)
-
-**Core tickers:**
-AAPL, MSFT, GOOGL, AMZN, NVDA, META, TSLA, BRK-B, JPM, V, JNJ, WMT, UNH, MA, PG, HD, CVX, MRK, ABBV, PEP, KO, PFE, AVGO, COST, TMO, DIS, CSCO, VZ, ADBE, WFC, ACN, ABT, CRM, CMCSA, TXN, NKE
-
-**File:** `bronze/fmp/ingest.py`
-
-## Pipeline Structure
-
-```
-agents/etl/
-├── bronze/           # Raw ingestion from source APIs
-│   ├── binance/      # Binance crypto data ← PRIMARY
-│   ├── coinbase/     # Coinbase (disabled — code remains for future use)
-│   ├── fmp/          # Financial Modeling Prep (equities)
-│   ├── ibkr/         # Interactive Brokers (portfolio)
-│   ├── hkex/         # Hong Kong Exchange
-│   ├── yfinance/     # Yahoo Finance (equities ONLY)
-│   └── manual/       # Manual CSV uploads
-├── silver/           # Clean & normalize
-│   └── crypto_normalize.py  ← Binance source
-├── gold/             # Curated by asset type
-│   ├── crypto/       # Crypto metrics ← Binance source
-│   ├── equity/       # Stock metrics
-│   └── ...
-├── consumption/      # Frontend-optimized tables
-└── daily_refresh.sh  # Main orchestration script
-```
-
-## Running the Pipeline
+- Python 3.10+
+- PostgreSQL 14+ (production: AWS RDS)
+- `hmmlearn`, `scikit-learn`, `joblib`, `pandas`, `numpy`, `psycopg2`, `requests`, `beautifulsoup4`
 
 ```bash
-# Full refresh
-cd /home/ubuntu/.openclaw/workspace/quant_research/agents/etl
-bash daily_refresh.sh
-
-# Run just crypto bronze
-python3 bronze/binance/crypto_ingest.py
-
-# Run just crypto silver
-python3 silver/crypto_normalize.py
-
-# Run just crypto gold
-python3 gold/crypto/crypto_metrics.py
+pip install -r requirements.txt
 ```
 
-## Next Steps
+## Setup
 
-1. **✓ Binance credentials** — Already set in `~/.openclaw/.env`
-2. **✓ FMP API key** — Already set in `~/.openclaw/.env`
-3. **Test the pipeline** with full refresh:
-   ```bash
-   cd /home/ubuntu/.openclaw/workspace/quant_research/agents/etl
-   bash daily_refresh.sh
-   ```
-4. **Monitor API usage** — Check `etl/.state/fmp_api_state.json` for FMP rate limit status
-5. **Verify outputs**:
-   - Binance: `bronze/binance/YYYYMMDD/*.parquet`
-   - FMP: `bronze/fmp/YYYYMMDD/*.parquet`
-   - Gold crypto: `gold/crypto/crypto_metrics_YYYYMMDD.parquet`
+1. Clone the repo
+2. `cp .env.template .env`
+3. Fill in:
+   - `FRED_KEY` — for macro data (optional, fallback included)
+   - `DATA_PATH` — local data directory
+   - `DB_CONNECTION_STRING` — PostgreSQL connection string
+4. `pip install -r requirements.txt`
+5. `python run_daily.py`
+
+## Running the pipeline
+
+```bash
+# Daily run (normal mode, < 5 min)
+python run_daily.py
+
+# Weekly aux data (earnings + holdings — run separately, ~10-15 min)
+python bronze/yfinance/ingest_yfinance_aux.py
+
+# Run tests
+pytest tests/test_regime.py -v
+
+# Full history rebuild
+python run_daily.py --backfill
+```
+
+## Output
+
+**Primary output table:** `gold.regime_label`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| date | DATE PK | Trading day |
+| regime | VARCHAR(10) | Final label: TREND, MEAN_REV, CARRY, EVENT, FLAT |
+| hmm_label | VARCHAR(10) | Raw HMM state (audit) |
+| override_used | BOOLEAN | True if rule fired, False if HMM fallback |
+| confidence | FLOAT | Max posterior probability from HMM |
+| severity | INT | Event severity (0=none, 1=EIA, 2=CPI/NFP, 3=FOMC) |
+
+**Query today's regime:**
+```python
+from regime.regime_rules import get_active_strategies
+print(get_active_strategies())
+```
+
+## Regime labels and strategy routing
+
+| Regime | Active Strategies | Condition |
+|--------|-------------------|-----------|
+| TREND | 1, 2, 6, 11, 15, 16, 18 | ADX > 22, H > 0.55, vol expanding |
+| MEAN_REV | 3, 5, 8, 10, 13, 14, 19, 20 | ADX < 22, vol contracting, fear subsided |
+| CARRY | 7, 17 | RV/IV < 0.80, VIX z-score < 0 |
+| EVENT | 4, 12 | High-severity macro release (FOMC, CPI, NFP) |
+| FLAT | — | VIX z-score > 2.5 (panic — all strategies off) |
+
+**EIA Wednesdays:** Strategy 12 is additively included regardless of base regime.
+
+## Architecture
+
+```
+Stage 1 — INGEST (bronze)
+  ├── yfinance/ingest_yfinance.py
+  ├── yfinance/ingest_vix.py
+  ├── binance/ingest_binance.py
+  ├── binance/ingest_funding_rates.py
+  ├── cftc/ingest_cot_euro_fx.py
+  └── macro/ingest_macro_calendar.py
+
+Stage 2 — SILVER (clean)
+  └── clean_prices.py
+
+Stage 3 — GOLD (analytics)
+  └── gold_builder.py
+      ├── build_daily_ohlcv()
+      ├── build_vix_regime()
+      ├── build_macro_flags()
+      ├── build_funding_metrics()
+      ├── build_cot_sentiment()
+      ├── compute_features()      ← 11 features
+      ├── train_hmm()             ← 3-state GaussianHMM
+      └── build_regime_label()    ← rule override + HMM fallback
+
+Stage 4 — REPORT
+  └── Today's regime + structured log
+```
+
+### Goals completed
+
+- **Goal 1:** Data ingestion (yfinance, VIX, Binance, CFTC, FRED macro)
+- **Goal 2:** Feature engineering (ADX, Hurst, RV, VIX z-score, breadth, etc.)
+- **Goal 3:** HMM training (3 states, 6 features, 756-day rolling window)
+- **Goal 4:** Rule-override layer (5 regimes, strategy router, EIA add-on)
+- **Goal 5:** Orchestrator, tests, documentation
+
+## Known limitations
+
+- `funding_z` pre-2025 is set to 0.0 (neutral) — Binance funding data only available from 2025
+- Hurst exponent on short windows (30 days) is noisy — used as a weak signal
+- COT data has a 77-day gap in 2025 due to CFTC reporting delays
+- Macro event calendar uses hardcoded fallback schedules for BLS/FOMC (web scraping blocked by 403)
+- EIA Wednesdays are generated programmatically; actual holiday closures may differ
+
+## File layout
+
+```
+etl/
+├── run_daily.py              ← Main orchestrator
+├── gold/gold_builder.py      ← Gold layer builder
+├── regime/
+│   ├── train_hmm.py          ← HMM trainer
+│   ├── regime_rules.py       ← Rule engine + strategy router
+│   └── hmm_model.pkl         ← Serialized model
+├── bronze/macro/
+│   └── ingest_macro_calendar.py  ← Actual release dates
+├── tests/
+│   └── test_regime.py        ← 9 pytest cases
+├── logs/                     ← Daily run logs (run_YYYYMMDD.log)
+└── README.md                 ← This file
+```
+
+## Error handling
+
+- Bronze scripts retry 3× with 30s backoff
+- Stage 1/2 failure → abort with exit code 1 (no gold on stale data)
+- Stage 3 failure → log warning, continue (yesterday's labels still valid)
+- Stage 4 failure → log warning only
+- All logs written to `logs/run_YYYYMMDD.log`

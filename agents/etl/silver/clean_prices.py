@@ -10,8 +10,13 @@ Rules:
   - Tag asset_class and market from silver.asset_registry
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+sys.path.insert(0, '/home/ubuntu/.hermes/profiles/qr_etl/home/trading-platform/agents/etl/shared/scripts')
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
+
+# Load Hermes env file
+from dotenv import load_dotenv
+load_dotenv(os.path.expanduser('~/.hermes/profiles/qr_etl/env/etl.env'))
+
 from db import get_connection
 
 SQL = """
@@ -34,31 +39,17 @@ WITH ranked AS (
 
   UNION ALL
 
-  -- FMP (priority 2)
+  -- FX prices (priority 2)
   SELECT
-    p.ticker,
+    p.pair AS ticker,
     ar.asset_class,
     ar.market,
-    p.date,
-    p.open, p.high, p.low, p.close, p.volume, p.adjusted_close,
-    'fmp' AS source,
+    p.timestamp::date AS date,
+    p.open, p.high, p.low, p.close, p.volume, p.close AS adjusted_close,
+    'fx' AS source,
     2 AS priority
-  FROM bronze.fmp_prices p
-  LEFT JOIN silver.asset_registry ar ON ar.ticker = p.ticker
-
-  UNION ALL
-
-  -- Manual (priority 3)
-  SELECT
-    p.ticker,
-    ar.asset_class,
-    ar.market,
-    p.date,
-    p.open, p.high, p.low, p.close, p.volume, p.adjusted_close,
-    'manual' AS source,
-    3 AS priority
-  FROM bronze.manual_prices p
-  LEFT JOIN silver.asset_registry ar ON ar.ticker = p.ticker
+  FROM bronze.fx_prices p
+  LEFT JOIN silver.asset_registry ar ON ar.ticker = p.pair
 ),
 best AS (
   SELECT DISTINCT ON (ticker, date) *

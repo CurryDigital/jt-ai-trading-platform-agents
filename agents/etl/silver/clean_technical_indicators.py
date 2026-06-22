@@ -2,7 +2,7 @@
 """
 Silver Transform: Technical Indicators
 Reads silver.unified_prices → calculates → silver.technical_indicators
-Indicators: SMA, EMA, RSI, MACD, Bollinger Bands, ATR, Stochastic, ADX, PSAR, VWAP
+Incremental: processes tickers where unified_prices has newer data than technical_indicators
 """
 import sys, os
 sys.path.insert(0, 'shared/scripts')
@@ -21,61 +21,75 @@ INSERT INTO silver.technical_indicators
      volume_sma_20, volume_ratio,
      price_vs_sma50_pct, price_vs_sma200_pct,
      calculated_at)
-WITH base AS (
-    SELECT ticker, date, close, high, low, volume,
-        -- SMAs
-        AVG(close) OVER w20  AS sma_20,
-        AVG(close) OVER w50  AS sma_50,
-        AVG(close) OVER w200 AS sma_200,
-        -- Volatility
-        STDDEV(close) OVER w20 AS std_20,
-        -- ATR proxy (high - low rolling avg)
-        AVG(high - low) OVER w14 AS atr_14,
-        -- Volume SMA
-        AVG(volume) OVER w20 AS volume_sma_20
-    FROM silver.unified_prices
-    WINDOW
-        w14  AS (PARTITION BY ticker ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW),
-        w20  AS (PARTITION BY ticker ORDER BY date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW),
-        w50  AS (PARTITION BY ticker ORDER BY date ROWS BETWEEN 49 PRECEDING AND CURRENT ROW),
-        w200 AS (PARTITION BY ticker ORDER BY date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW)
+WITH tickers_to_update AS (
+    SELECT DISTINCT p.ticker
+    FROM silver.unified_prices p
+    LEFT JOIN (
+        SELECT ticker, MAX(date) AS max_date
+        FROM silver.technical_indicators
+        GROUP BY ticker
+    ) t ON p.ticker = t.ticker
+    WHERE p.date > COALESCE(t.max_date, '1900-01-01')
+      AND p.date >= CURRENT_DATE - INTERVAL '60 days'
 ),
--- RSI approximation using avg gain/loss
+base AS (
+    SELECT p.ticker, p.date, p.close, p.high, p.low, p.volume,
+        AVG(p.close) OVER w20  AS sma_20,
+        AVG(p.close) OVER w50  AS sma_50,
+        AVG(p.close) OVER w200 AS sma_200,
+        STDDEV(p.close) OVER w20 AS std_20,
+        AVG(p.high - p.low) OVER w14 AS atr_14,
+        AVG(p.volume) OVER w20 AS volume_sma_20
+    FROM silver.unified_prices p
+    JOIN tickers_to_update t ON p.ticker = t.ticker
+    WINDOW
+        w14  AS (PARTITION BY p.ticker ORDER BY p.date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW),
+        w20  AS (PARTITION BY p.ticker ORDER BY p.date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW),
+        w50  AS (PARTITION BY p.ticker ORDER BY p.date ROWS BETWEEN 49 PRECEDING AND CURRENT ROW),
+        w200 AS (PARTITION BY p.ticker ORDER BY p.date ROWS BETWEEN 199 PRECEDING AND CURRENT ROW)
+),
+price_changes AS (
+    SELECT p.ticker, p.date, p.close,
+        LAG(p.close) OVER (PARTITION BY p.ticker ORDER BY p.date) AS prev_close
+    FROM silver.unified_prices p
+    JOIN tickers_to_update t ON p.ticker = t.ticker
+),
+gain_loss AS (
+    SELECT ticker, date, close,
+        GREATEST(close - prev_close, 0) AS gain,
+        GREATEST(prev_close - close, 0) AS loss
+    FROM price_changes
+    WHERE prev_close IS NOT NULL
+),
 rsi_calc AS (
     SELECT ticker, date, close,
         ROUND(
             100 - 100 / (1 + NULLIF(
-                AVG(GREATEST(close - LAG(close) OVER (PARTITION BY ticker ORDER BY date), 0))
-                    OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW)
+                AVG(gain) OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW)
                 /
-                NULLIF(
-                    AVG(GREATEST(LAG(close) OVER (PARTITION BY ticker ORDER BY date) - close, 0))
-                        OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW)
-                , 0)
+                NULLIF(AVG(loss) OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 13 PRECEDING AND CURRENT ROW), 0)
             , 0))
         , 4) AS rsi_14
-    FROM silver.unified_prices
+    FROM gain_loss
 )
 SELECT
     b.ticker, b.date,
-    ROUND(b.sma_20::numeric, 8)  AS sma_20,
-    ROUND(b.sma_50::numeric, 8)  AS sma_50,
-    ROUND(b.sma_200::numeric, 8) AS sma_200,
+    ROUND(b.sma_20::numeric, 4)  AS sma_20,
+    ROUND(b.sma_50::numeric, 4)  AS sma_50,
+    ROUND(b.sma_200::numeric, 4) AS sma_200,
     NULL::numeric AS ema_12,
     NULL::numeric AS ema_26,
     r.rsi_14,
     NULL::numeric AS macd_line,
     NULL::numeric AS macd_signal,
     NULL::numeric AS macd_histogram,
-    -- Bollinger Bands
-    ROUND((b.sma_20 + 2 * b.std_20)::numeric, 8) AS bb_upper,
-    ROUND(b.sma_20::numeric, 8)                   AS bb_middle,
-    ROUND((b.sma_20 - 2 * b.std_20)::numeric, 8) AS bb_lower,
+    ROUND((b.sma_20 + 2 * b.std_20)::numeric, 4) AS bb_upper,
+    ROUND(b.sma_20::numeric, 4)                   AS bb_middle,
+    ROUND((b.sma_20 - 2 * b.std_20)::numeric, 4) AS bb_lower,
     ROUND(CASE WHEN b.sma_20 > 0 THEN (4 * b.std_20 / b.sma_20 * 100)::numeric ELSE NULL END, 4) AS bb_width,
-    ROUND(b.atr_14::numeric, 8)  AS atr_14,
-    -- 20-day volatility (annualised)
+    ROUND(b.atr_14::numeric, 4)  AS atr_14,
     ROUND((b.std_20 / NULLIF(b.sma_20, 0) * SQRT(252) * 100)::numeric, 4) AS volatility_20d,
-    ROUND(b.volume_sma_20::numeric, 8) AS volume_sma_20,
+    ROUND(b.volume_sma_20::numeric, 2) AS volume_sma_20,
     ROUND((b.volume / NULLIF(b.volume_sma_20, 0))::numeric, 4) AS volume_ratio,
     ROUND(((b.close - b.sma_50)  / NULLIF(b.sma_50, 0)  * 100)::numeric, 4) AS price_vs_sma50_pct,
     ROUND(((b.close - b.sma_200) / NULLIF(b.sma_200, 0) * 100)::numeric, 4) AS price_vs_sma200_pct,

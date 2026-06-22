@@ -100,9 +100,13 @@ ON CONFLICT (ticker, report_date) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(UPSERT_SQL)
-    print(f"✅ silver.unified_earnings — {cur.rowcount} rows upserted")
-    conn.commit()
+    try:
+        cur.execute(UPSERT_SQL)
+        print(f"✅ silver.unified_earnings — {cur.rowcount} rows upserted")
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️  FMP earnings skipped: {e}")
+        conn.rollback()
     conn.close()
 
 if __name__ == "__main__":

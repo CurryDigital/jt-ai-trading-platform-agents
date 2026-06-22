@@ -18,7 +18,10 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-load_dotenv('/home/ubuntu/.openclaw/.env')
+SCRIPT_DIR = Path(__file__).parent
+WORKSPACE = SCRIPT_DIR.parent.parent
+ENV_FILE = WORKSPACE.parent.parent / 'env' / 'etl.env'
+load_dotenv(ENV_FILE)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('coinbase_bronze')
@@ -41,7 +44,7 @@ TRADING_PAIRS = [
     'LTC-USD', 'ATOM-USD', 'ETC-USD', 'XLM-USD'
 ]
 
-BRONZE_DIR = Path('/home/ubuntu/.openclaw/workspace/quant_research/agents/etl/bronze/coinbase')
+BRONZE_DIR = WORKSPACE / 'bronze' / 'coinbase'
 
 
 def check_credentials():
@@ -122,7 +125,7 @@ def get_products():
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to fetch products: {e}
+        logger.error(f"Failed to fetch products: {e}")
         return None
 
 

@@ -1,3 +1,9 @@
+# SPLIT_TARGET: reads bronze/silver AND writes gold.
+# Future: split into ingestion (Pipeline A) + signal (Pipeline B) step.
+# Pipeline: MIXED (violates clean boundary — do not add to Pipeline A or B without splitting)
+# Date flagged: 2026-06-13
+# Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
+
 #!/usr/bin/env python3
 """
 Bronze Ingestion: FRED (Federal Reserve Economic Data)
@@ -16,6 +22,11 @@ Key Indicators:
 import sys, os, requests
 sys.path.insert(0, 'shared/scripts')
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
+
+# Load Hermes env file
+from dotenv import load_dotenv
+load_dotenv(os.path.expanduser('~/.hermes/profiles/qr_etl/env/etl.env'))
+
 from db import get_connection
 from datetime import date, timedelta
 
