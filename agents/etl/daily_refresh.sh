@@ -1,7 +1,16 @@
 #!/bin/bash
 # Daily Data Refresh Script — Medallion Architecture
-# Updated for Hermes shadow workspace
 # Runs: Bronze → Silver → Gold → Consumption
+#
+# Fail-fast contract (2026-06-22):
+#   - Exits non-zero immediately if the env file is missing OR the Python
+#     venv is missing psycopg2 / python-dotenv. Cron was previously running
+#     a 100%-failing pipeline silently, writing "fresh" to gold_layer_state
+#     and reporting success. See README.md "honest state" for rationale.
+#   - Per-stage success/failure is tracked and written to .state.json by
+#     write_pipeline_state.py. sync_gold_layer_state.py reads that file
+#     and updates the DB. If the script aborts before the writer runs,
+#     gold_layer_state defaults to 'stale' instead of being left lying.
 
 set -uo pipefail
 
@@ -21,28 +30,49 @@ echo "=========================================="
 export PYTHONPATH="${WORKSPACE}/shared/scripts:${PYTHONPATH:-}"
 export AWS_REGION="ap-southeast-1"
 
-# Load environment variables from Hermes-managed env file
+# ── PREAMBLE: fail loudly on misconfigured environment ────────────────────
+# Load environment variables from Hermes-managed env file. We treat a missing
+# env file as fatal — the previous behaviour silently continued with whatever
+# env the cron inherited, which caused months of stale data dashboards.
 ENV_FILE="/home/ubuntu/.hermes/profiles/qr_etl/env/etl.env"
-if [ -f "${ENV_FILE}" ]; then
-    set -a && source "${ENV_FILE}" && set +a
-    echo "Loaded env from ${ENV_FILE}"
-else
-    echo "WARNING: Env file not found at ${ENV_FILE}"
+if [ ! -f "${ENV_FILE}" ]; then
+    echo "FATAL: env file not found at ${ENV_FILE}"
+    echo "Hermes profile may be misconfigured. Run bootstrap_hermes_venv.sh."
+    exit 64  # EX_USAGE
 fi
+set -a && source "${ENV_FILE}" && set +a
+echo "Loaded env from ${ENV_FILE}"
 
-# Use Hermes venv Python
+# Use Hermes venv Python — but verify it actually exists.
 PYTHON="/home/ubuntu/.hermes/hermes-agent/venv/bin/python3"
 if [ ! -f "${PYTHON}" ]; then
-    PYTHON="python3"
+    echo "FATAL: Hermes venv Python not found at ${PYTHON}"
+    echo "Run bootstrap_hermes_venv.sh to provision the venv."
+    exit 65  # EX_DATAERR
 fi
+
+# Verify required Python deps are importable. If not, the entire pipeline
+# would otherwise crash silently inside each stage. Better to fail here with
+# one clear message than 30 ModuleNotFoundError tracebacks scattered in logs.
+if ! "${PYTHON}" -c "import psycopg2, dotenv" 2>/dev/null; then
+    echo "FATAL: Hermes venv missing psycopg2 or python-dotenv."
+    echo "  ${PYTHON} cannot import psycopg2 / dotenv."
+    echo "  Run: bash ${WORKSPACE}/../../bootstrap_hermes_venv.sh"
+    exit 70  # EX_SOFTWARE
+fi
+echo "✅ Hermes venv check: psycopg2 + dotenv importable"
 
 cd "${WORKSPACE}"
 
-# Failure tracking arrays
+# Failure / success tracking arrays
 FAILED_BRONZE=()
+OK_BRONZE=()
 FAILED_SILVER=()
+OK_SILVER=()
 FAILED_GOLD=()
+OK_GOLD=()
 FAILED_CONSUMPTION=()
+OK_CONSUMPTION=()
 
 # Per-script timeout (seconds)
 BRONZE_TIMEOUT=120
@@ -57,6 +87,7 @@ run_bronze() {
     echo "→ ${name}..."
     if timeout ${BRONZE_TIMEOUT}s "${PYTHON}" "${script}" "$@"; then
         echo "  ✅ ${name} complete"
+        OK_BRONZE+=("${name}")
     else
         local exit_code=$?
         if [ $exit_code -eq 124 ]; then
@@ -74,6 +105,7 @@ run_silver() {
     echo "→ ${name}..."
     if timeout ${SILVER_TIMEOUT}s "${PYTHON}" "${script}"; then
         echo "  ✅ ${name} complete"
+        OK_SILVER+=("${name}")
     else
         local exit_code=$?
         if [ $exit_code -eq 124 ]; then
@@ -91,6 +123,7 @@ run_gold() {
     echo "→ ${name}..."
     if timeout ${GOLD_TIMEOUT}s "${PYTHON}" "${script}"; then
         echo "  ✅ ${name} complete"
+        OK_GOLD+=("${name}")
     else
         local exit_code=$?
         if [ $exit_code -eq 124 ]; then
@@ -108,6 +141,7 @@ run_consumption() {
     echo "→ ${name}..."
     if timeout ${CONSUMPTION_TIMEOUT}s "${PYTHON}" "${script}"; then
         echo "  ✅ ${name} complete"
+        OK_CONSUMPTION+=("${name}")
     else
         local exit_code=$?
         if [ $exit_code -eq 124 ]; then
@@ -266,7 +300,28 @@ echo "✅ Consumption complete (${#FAILED_CONSUMPTION[@]} failures)"
 # ════════════════════════════════════════════
 echo ""
 echo "=========================================="
-"${PYTHON}" "${WORKSPACE}/sync_gold_layer_state.py" && echo "✅ gold_layer_state synced to DB" || echo "⚠️ sync_gold_layer_state FAILED"
+
+# Write the per-stage truth into .state.json BEFORE sync_gold_layer_state.py runs.
+# This is the only place that decides what state to claim — failing fast
+# above means we never lie about freshness.
+join_csv() { local IFS=','; echo "$*"; }
+
+"${PYTHON}" "${WORKSPACE}/write_pipeline_state.py" \
+    --output "${WORKSPACE}/.state.json" \
+    --bronze-ok      "$(join_csv "${OK_BRONZE[@]:-}")" \
+    --bronze-failed  "$(join_csv "${FAILED_BRONZE[@]:-}")" \
+    --silver-ok      "$(join_csv "${OK_SILVER[@]:-}")" \
+    --silver-failed  "$(join_csv "${FAILED_SILVER[@]:-}")" \
+    --gold-ok        "$(join_csv "${OK_GOLD[@]:-}")" \
+    --gold-failed    "$(join_csv "${FAILED_GOLD[@]:-}")" \
+    --consumption-ok      "$(join_csv "${OK_CONSUMPTION[@]:-}")" \
+    --consumption-failed  "$(join_csv "${FAILED_CONSUMPTION[@]:-}")" \
+    && echo "✅ .state.json written" \
+    || echo "⚠️ write_pipeline_state.py FAILED — sync will default to 'stale'"
+
+"${PYTHON}" "${WORKSPACE}/sync_gold_layer_state.py" \
+    && echo "✅ gold_layer_state synced to DB" \
+    || echo "⚠️ sync_gold_layer_state FAILED"
 
 TOTAL_FAILS=$(( ${#FAILED_BRONZE[@]} + ${#FAILED_SILVER[@]} + ${#FAILED_GOLD[@]} + ${#FAILED_CONSUMPTION[@]} ))
 echo "DAILY REFRESH COMPLETED: $(date)"
