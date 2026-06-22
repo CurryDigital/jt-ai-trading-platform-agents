@@ -1,0 +1,146 @@
+{
+  "_doc": [
+    "Single source of truth for strategy onboarding.",
+    "Edit this file (or use register_strategy.py CLI) to add or disable strategies.",
+    "registry_loader.py reads this; run_signals.py and regime/regime_rules.py derive STRATEGY_MAP and ALL_STRATEGIES from it.",
+    "Fields per entry:",
+    "  id          : integer, must be unique. Used as the strategy_id in gold.strategy_signals.",
+    "  name        : short label shown in dashboards and logs.",
+    "  class_path  : 'module.path:ClassName' — must be importable from the agents/etl/ workspace root.",
+    "  regime      : one of {TREND, MEAN_REV, CARRY, EVENT, FLAT}. Decides when the strategy is gated active.",
+    "  enabled     : true = run in daily cron and write signals. false = imported only, NEVER writes signals.",
+    "  asset_class : {equity, crypto, fx, commodity}. Used for filtering and reporting.",
+    "  params      : free-form dict the strategy class reads (basket, lookback windows, thresholds...).",
+    "                Strategies that don't yet read from params still work — they ignore this field.",
+    "  notes       : human-readable history / TODO."
+  ],
+  "schema_version": 1,
+  "strategies": [
+    {
+      "id": 1, "name": "Dual EMA crossover",
+      "class_path": "strategies.trend.strategy_01:Strategy01",
+      "regime": "TREND", "enabled": true, "asset_class": "equity",
+      "params": {
+        "basket": ["SPY", "QQQ", "IWM", "GLD", "TLT"],
+        "ema_fast": 10, "ema_slow": 50,
+        "delta_long_threshold": 0.001, "delta_short_threshold": -0.001,
+        "vol_window": 20
+      },
+      "notes": "Real implementation. Params still read from inside the class; migrate to read from this dict in a follow-up."
+    },
+    {
+      "id": 2, "name": "52-week high momentum",
+      "class_path": "strategies.trend.strategy_02:Strategy02",
+      "regime": "TREND", "enabled": true, "asset_class": "equity",
+      "params": {}, "notes": "Real implementation."
+    },
+    {
+      "id": 3, "name": "RSI(2) mean reversion",
+      "class_path": "strategies.stubs:Strategy03",
+      "regime": "MEAN_REV", "enabled": false, "asset_class": "equity",
+      "params": {}, "notes": "Stub — returns 0. Disabled until real implementation."
+    },
+    {
+      "id": 4, "name": "Earnings PEAD drift",
+      "class_path": "strategies.stubs:Strategy04",
+      "regime": "EVENT", "enabled": false, "asset_class": "equity",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 5, "name": "Sector rotation",
+      "class_path": "strategies.stubs:Strategy05",
+      "regime": "MEAN_REV", "enabled": false, "asset_class": "equity",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 6, "name": "BTC Donchian breakout",
+      "class_path": "strategies.trend.strategy_06:Strategy06",
+      "regime": "TREND", "enabled": true, "asset_class": "crypto",
+      "params": {}, "notes": "Real implementation."
+    },
+    {
+      "id": 7, "name": "BTC funding-rate carry",
+      "class_path": "strategies.stubs:Strategy07",
+      "regime": "CARRY", "enabled": false, "asset_class": "crypto",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 8, "name": "BTC-ETH pairs z-score",
+      "class_path": "strategies.stubs:Strategy08",
+      "regime": "MEAN_REV", "enabled": false, "asset_class": "crypto",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 9, "name": "Altcoin momentum basket",
+      "class_path": "strategies.stubs:Strategy09",
+      "regime": "TREND", "enabled": false, "asset_class": "crypto",
+      "params": {}, "notes": "Stub. Disabled. Not in legacy STRATEGY_MAP regime — kept disabled."
+    },
+    {
+      "id": 10, "name": "Crypto weekend vol fade",
+      "class_path": "strategies.stubs:Strategy10",
+      "regime": "MEAN_REV", "enabled": false, "asset_class": "crypto",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 11, "name": "E-mini S&P trend + ATR",
+      "class_path": "strategies.trend.strategy_11:Strategy11",
+      "regime": "TREND", "enabled": true, "asset_class": "equity",
+      "params": {}, "notes": "Real implementation."
+    },
+    {
+      "id": 12, "name": "WTI EIA event drift",
+      "class_path": "strategies.stubs:Strategy12",
+      "regime": "EVENT", "enabled": false, "asset_class": "commodity",
+      "params": {}, "notes": "Stub. Disabled. Note: base_strategy.is_active_today() has an EIA-day override for id=12 — keep id stable."
+    },
+    {
+      "id": 13, "name": "Gold-DXY stat-arb",
+      "class_path": "strategies.stubs:Strategy13",
+      "regime": "MEAN_REV", "enabled": false, "asset_class": "commodity",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 14, "name": "VIX term-structure roll",
+      "class_path": "strategies.stubs:Strategy14",
+      "regime": "MEAN_REV", "enabled": false, "asset_class": "equity",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 15, "name": "Natgas seasonal",
+      "class_path": "strategies.trend.strategy_15:Strategy15",
+      "regime": "TREND", "enabled": true, "asset_class": "commodity",
+      "params": {}, "notes": "Real implementation."
+    },
+    {
+      "id": 16, "name": "London FX breakout",
+      "class_path": "strategies.trend.strategy_16:Strategy16",
+      "regime": "TREND", "enabled": true, "asset_class": "fx",
+      "params": {}, "notes": "Real implementation."
+    },
+    {
+      "id": 17, "name": "G10 FX carry",
+      "class_path": "strategies.stubs:Strategy17",
+      "regime": "CARRY", "enabled": false, "asset_class": "fx",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 18, "name": "USD/JPY macro trend",
+      "class_path": "strategies.trend.strategy_18:Strategy18",
+      "regime": "TREND", "enabled": true, "asset_class": "fx",
+      "params": {}, "notes": "Real implementation."
+    },
+    {
+      "id": 19, "name": "EUR/USD COT fade",
+      "class_path": "strategies.stubs:Strategy19",
+      "regime": "MEAN_REV", "enabled": false, "asset_class": "fx",
+      "params": {}, "notes": "Stub. Disabled."
+    },
+    {
+      "id": 20, "name": "FX ATR overextension",
+      "class_path": "strategies.stubs:Strategy20",
+      "regime": "MEAN_REV", "enabled": false, "asset_class": "fx",
+      "params": {}, "notes": "Stub. Disabled."
+    }
+  ]
+}

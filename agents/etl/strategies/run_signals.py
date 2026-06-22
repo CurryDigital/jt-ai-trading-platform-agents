@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
 """
-Daily Signal Runner — Goal 2
-============================
-Loops through all 20 strategies, calls run() and save().
-Imports real TREND strategies from strategies/trend/.
-Remaining 13 strategies use stubs.
-Prints a summary table at the end.
+Daily Signal Runner
+===================
+Loads the strategy registry, instantiates every enabled strategy, calls
+run() + save(), and prints a summary table.
+
+2026-06-22: refactored to read strategies/registry.json instead of
+hardcoding `from strategies.trend.strategy_01 import Strategy01` for
+20 classes. Adding a new strategy now requires no edits to this file.
+
+To onboard a new strategy:
+  python3 strategies/register_strategy.py --id 21 --name "..." --regime TREND --asset-class equity
+Then implement strategies/trend/strategy_21.py::Strategy21 and flip
+`enabled: true` in registry.json. The next cron picks it up.
 """
-import sys, os
+
+import os
+import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE = os.path.normpath(os.path.join(SCRIPT_DIR, '..'))
@@ -17,35 +26,16 @@ sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 
 from db import get_connection
-
-# Import TREND strategies (real implementations)
-from strategies.trend.strategy_01 import Strategy01
-from strategies.trend.strategy_02 import Strategy02
-from strategies.trend.strategy_06 import Strategy06
-from strategies.trend.strategy_11 import Strategy11
-from strategies.trend.strategy_15 import Strategy15
-from strategies.trend.strategy_16 import Strategy16
-from strategies.trend.strategy_18 import Strategy18
-
-# Import stubs for remaining strategies
-from strategies.stubs import (
-    Strategy03, Strategy04, Strategy05,
-    Strategy07, Strategy08, Strategy09, Strategy10,
-    Strategy12, Strategy13, Strategy14,
-    Strategy17, Strategy19, Strategy20,
+from strategies.registry_loader import (
+    load_enabled_strategies, import_strategy_class, RegistryError,
 )
 
-ALL_STRATEGIES = [
-    Strategy01, Strategy02, Strategy03, Strategy04, Strategy05,
-    Strategy06, Strategy07, Strategy08, Strategy09, Strategy10,
-    Strategy11, Strategy12, Strategy13, Strategy14, Strategy15,
-    Strategy16, Strategy17, Strategy18, Strategy19, Strategy20,
-]
 
-
-def print_summary(results: list, regime: str):
-    """Print formatted summary table."""
-    today = results[0]['date'] if results else 'N/A'
+def print_summary(results: list, regime: str) -> None:
+    if not results:
+        print(f"  Date: N/A  Regime: {regime}  (no strategies ran)")
+        return
+    today = results[0]['date']
     print(f"\n  Date: {today}")
     print(f"  Regime: {regime}")
     print(f"  ┌─────┬──────────────────────────┬────────┬────────┐")
@@ -58,7 +48,17 @@ def print_summary(results: list, regime: str):
     print(f"  └─────┴──────────────────────────┴────────┴────────┘")
 
 
-def main():
+def main() -> int:
+    try:
+        enabled = load_enabled_strategies()
+    except RegistryError as e:
+        print(f"FATAL: strategy registry invalid: {e}", file=sys.stderr)
+        return 2
+
+    if not enabled:
+        print("⚠️  No enabled strategies in registry.json — nothing to do.", file=sys.stderr)
+        return 0
+
     conn = get_connection()
 
     # Get today's regime for display
@@ -71,19 +71,29 @@ def main():
     regime = row[0] if row else 'UNKNOWN'
 
     results = []
-    for StratClass in ALL_STRATEGIES:
+    n_errors = 0
+    for entry in enabled:
+        try:
+            StratClass = import_strategy_class(entry)
+        except RegistryError as e:
+            print(f"  ERROR loading strategy {entry.id} ({entry.name}): {e}", file=sys.stderr)
+            n_errors += 1
+            continue
         try:
             strat = StratClass(conn)
             result = strat.run()
             strat.save(result)
             results.append(result)
         except Exception as e:
-            print(f"  ERROR strategy {StratClass.__name__}: {e}")
+            print(f"  ERROR strategy {entry.id} ({entry.name}): {e}", file=sys.stderr)
+            n_errors += 1
 
     print_summary(results, regime)
     conn.close()
-    print(f"\n✅ Signal run complete — {len(results)} strategies processed")
+    print(f"\n✅ Signal run complete — {len(results)}/{len(enabled)} strategies processed "
+          f"({n_errors} errors)")
+    return 0 if n_errors == 0 else 1
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
