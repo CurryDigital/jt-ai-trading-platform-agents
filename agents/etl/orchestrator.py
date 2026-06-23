@@ -27,8 +27,14 @@ BRONZE = [
 ]
 
 SILVER = [
-    ('clean_prices',    'silver/clean_prices.py'),
-    ('clean_earnings',  'silver/clean_earnings.py'),
+    # 2026-06-22: clean_prices.py + clean_earnings.py deleted as duplicates
+    # of their clean_unified_* counterparts (which were the canonical newer
+    # versions with more columns and portable sys.path). compute_technical_indicators.py
+    # was kept over clean_technical_indicators.py — same naming convention,
+    # and the incremental ticker-filter from the deleted file is preserved
+    # as a TODO inside compute_technical_indicators.py.
+    ('clean_prices',    'silver/clean_unified_prices.py'),
+    ('clean_earnings',  'silver/clean_unified_earnings.py'),
     ('tech_indicators', 'silver/compute_technical_indicators.py'),
     ('market_indices',  'silver/sync_market_indices.py'),
     ('asset_registry',  'silver/clean_asset_registry.py'),

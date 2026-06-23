@@ -16,7 +16,7 @@ Usage from bash:
         --output .state.json \
         --bronze-ok "binance,fmp,yfinance,fred" \
         --bronze-failed "ibkr" \
-        --silver-ok "clean_prices,clean_earnings" \
+        --silver-ok "clean_unified_prices,clean_unified_earnings" \
         --silver-failed "" \
         --gold-ok "equity_kpis,stock_metrics" \
         --gold-failed "" \

@@ -137,12 +137,9 @@ run_silver "Asset registry" "silver/sync_asset_registry.py"
 # Market indices sync
 run_silver "Market indices" "silver/sync_market_indices.py"
 
-# Prices cleaning
-for f in silver/clean_prices.py silver/clean_unified_prices.py; do
-    if [ -f "$f" ]; then
-        run_silver "$(basename "$f" .py)" "$f"
-    fi
-done
+# Prices cleaning (2026-06-22: clean_prices.py deleted as a duplicate of
+# clean_unified_prices.py — see the silver-duplicate-resolution commit).
+run_silver "clean_unified_prices" "silver/clean_unified_prices.py"
 
 if [ ${#FAILED_SILVER[@]} -gt 0 ]; then
     echo "⚠️ Silver failures: ${FAILED_SILVER[*]}"

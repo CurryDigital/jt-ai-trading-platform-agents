@@ -85,7 +85,7 @@ Stage 1 — INGEST (bronze)
   └── macro/ingest_macro_calendar.py
 
 Stage 2 — SILVER (clean)
-  └── clean_prices.py
+  └── clean_unified_prices.py
 
 Stage 3 — GOLD (analytics)
   └── gold_builder.py

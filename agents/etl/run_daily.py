@@ -31,7 +31,8 @@ BRONZE = [
 ]
 
 SILVER = [
-    ('clean_prices', 'silver/clean_prices.py'),
+    # 2026-06-22: clean_prices.py was a duplicate; canonical is clean_unified_prices.py.
+    ('clean_prices', 'silver/clean_unified_prices.py'),
 ]
 
 GOLD = [
