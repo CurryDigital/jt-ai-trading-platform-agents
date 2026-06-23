@@ -1,75 +1,61 @@
 #!/usr/bin/env python3
 """
-S-06: BTC Donchian breakout (Crypto)
-Data: gold.daily_ohlcv ticker=BTC-USD, gold.crypto_funding_metrics
-Signal: long when close > 20d high, short when close < 20d low
-Filter: skip if funding_z > 2.0
-vol_target = 0.005 (half default)
+S-02: 52-week high momentum (Equities)
+Data: gold.daily_ohlcv, ticker=SPY
+Signal: long when close >= 0.98 * 252d high AND volume > 1.5x 20d avg
 """
 import sys, os
 import pandas as pd
+import numpy as np
 
+# Signal-agent layout (post 2026-06-22 split):
+#   agents/signals/strategies/trend/strategy_NN.py  ← this file
+#   agents/etl/shared/scripts/db.py                  ← canonical DB pool (cross-agent dep)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKSPACE = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..'))
-SHARED = os.path.join(WORKSPACE, 'shared', 'scripts')
-sys.path.insert(0, WORKSPACE)
-sys.path.insert(0, SHARED)
+SIGNALS_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..'))
+ETL_SHARED = os.path.normpath(os.path.join(SIGNALS_ROOT, '..', 'etl', 'shared', 'scripts'))
+sys.path.insert(0, SIGNALS_ROOT)
+sys.path.insert(0, ETL_SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 
 from strategies.base_strategy import BaseStrategy
+from db import get_connection
 
 
-class Strategy06(BaseStrategy):
+class Strategy02(BaseStrategy):
     def __init__(self, conn):
-        super().__init__(conn, 6, "BTC Donchian breakout", vol_target=0.005)
+        super().__init__(conn, 2, "52-week high momentum")
 
     def _load_data(self):
         cur = self.conn.cursor()
         cur.execute("""
-            SELECT date, close, high, low FROM gold.daily_ohlcv
-            WHERE ticker = 'BTC-USD'
+            SELECT date, close, volume FROM gold.daily_ohlcv
+            WHERE ticker = 'SPY'
             ORDER BY date
         """)
         rows = cur.fetchall()
-        df = pd.DataFrame(rows, columns=['date', 'close', 'high', 'low'])
+        df = pd.DataFrame(rows, columns=['date', 'close', 'volume'])
         df['date'] = pd.to_datetime(df['date'])
         df = df.set_index('date').sort_index()
-        for col in ['close', 'high', 'low']:
-            df[col] = df[col].astype(float)
+        df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
         return df
-
-    def _get_funding_z(self):
-        cur = self.conn.cursor()
-        cur.execute("""
-            SELECT funding_z FROM gold.crypto_funding_metrics
-            WHERE symbol = 'BTCUSDT'
-            ORDER BY date DESC LIMIT 1
-        """)
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            return float(row[0])
-        return 0.0
 
     def compute_signal(self) -> int:
         if not self.is_active_today():
             return 0
 
         df = self._load_data()
-        if len(df) < 21:
+        if len(df) < 252:
             return 0
 
-        funding_z = self._get_funding_z()
-        if funding_z > 2.0:
-            return 0
-
-        df['dc_hi'] = df['high'].rolling(20).max().shift(1)
-        df['dc_lo'] = df['low'].rolling(20).min().shift(1)
+        df['hi252'] = df['close'].rolling(252).max()
+        df['vol_avg20'] = df['volume'].rolling(20).mean()
 
         today = df.iloc[-1]
-        if today['close'] > today['dc_hi']:
+
+        if today['close'] >= today['hi252'] * 0.98 and today['volume'] > today['vol_avg20'] * 1.5:
             return 1
-        if today['close'] < today['dc_lo']:
-            return -1
         return 0
 
     def run(self) -> dict:

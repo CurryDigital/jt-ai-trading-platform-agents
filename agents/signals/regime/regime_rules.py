@@ -11,7 +11,15 @@ Export:
     get_active_strategies(conn) -> dict
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+
+# Signal-agent layout (post 2026-06-22 split):
+#   agents/signals/regime/regime_rules.py  ← this file
+#   agents/etl/shared/scripts/db.py         ← canonical DB pool (cross-agent dep)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SIGNALS_ROOT = os.path.normpath(os.path.join(_HERE, '..'))
+_ETL_SHARED = os.path.normpath(os.path.join(_SIGNALS_ROOT, '..', 'etl', 'shared', 'scripts'))
+if _SIGNALS_ROOT not in sys.path: sys.path.insert(0, _SIGNALS_ROOT)
+if _ETL_SHARED not in sys.path: sys.path.insert(0, _ETL_SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 from datetime import date
@@ -41,11 +49,7 @@ def _load_strategy_map():
         'FLAT'    : [],
     }
     try:
-        import sys, os
-        _here = os.path.dirname(os.path.abspath(__file__))
-        _workspace = os.path.normpath(os.path.join(_here, '..'))
-        if _workspace not in sys.path:
-            sys.path.insert(0, _workspace)
+        # _SIGNALS_ROOT was already added to sys.path at module top.
         from strategies.registry_loader import build_strategy_map
         return build_strategy_map()
     except Exception as e:

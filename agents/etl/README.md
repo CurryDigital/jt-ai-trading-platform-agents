@@ -54,8 +54,9 @@ python run_daily.py --backfill
 | confidence | FLOAT | Max posterior probability from HMM |
 | severity | INT | Event severity (0=none, 1=EIA, 2=CPI/NFP, 3=FOMC) |
 
-**Query today's regime:**
+**Query today's regime** (regime/ moved to agents/signals/ on 2026-06-22 — see signals/AGENT.md):
 ```python
+# from inside agents/signals/ (or with that dir on sys.path):
 from regime.regime_rules import get_active_strategies
 print(get_active_strategies())
 ```

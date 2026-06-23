@@ -185,10 +185,14 @@ def build_regime_features():
     mod.compute_features()
 
 def build_hmm_regime():
-    """Goal 3: Train HMM regime model"""
+    """Goal 3: Train HMM regime model.
+    Note: regime/ moved to agents/signals/regime/ on 2026-06-22. The path
+    below crosses the etl→signals boundary because HMM training reads
+    gold-layer features and writes back to gold — it's data-engineering
+    work that happens to live with the signal agent for code locality."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("train_hmm",
-        os.path.join(os.path.dirname(__file__), "..", "regime", "train_hmm.py"))
+        os.path.join(os.path.dirname(__file__), "..", "..", "signals", "regime", "train_hmm.py"))
     if spec is None or spec.loader is None:
         raise RuntimeError("Failed to load train_hmm module spec")
     mod = importlib.util.module_from_spec(spec)
@@ -196,10 +200,11 @@ def build_hmm_regime():
     mod.train_hmm()
 
 def build_regime_label():
-    """Goal 4: Build regime label with rule overrides"""
+    """Goal 4: Build regime label with rule overrides.
+    Note: regime/ moved to agents/signals/regime/ on 2026-06-22."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("regime_rules",
-        os.path.join(os.path.dirname(__file__), "..", "regime", "regime_rules.py"))
+        os.path.join(os.path.dirname(__file__), "..", "..", "signals", "regime", "regime_rules.py"))
     if spec is None or spec.loader is None:
         raise RuntimeError("Failed to load regime_rules module spec")
     mod = importlib.util.module_from_spec(spec)

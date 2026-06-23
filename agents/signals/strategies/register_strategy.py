@@ -56,11 +56,14 @@ this class is loaded for validation but its signals are NOT written to DB.
 import sys
 import os
 
+# Signal-agent layout (post 2026-06-22 split):
+#   agents/signals/strategies/<regime>/strategy_NN.py  ← this file
+#   agents/etl/shared/scripts/db.py                     ← canonical DB pool
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKSPACE = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..'))
-SHARED = os.path.join(WORKSPACE, 'shared', 'scripts')
-sys.path.insert(0, WORKSPACE)
-sys.path.insert(0, SHARED)
+SIGNALS_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..'))
+ETL_SHARED = os.path.normpath(os.path.join(SIGNALS_ROOT, '..', 'etl', 'shared', 'scripts'))
+sys.path.insert(0, SIGNALS_ROOT)
+sys.path.insert(0, ETL_SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 
 from strategies.base_strategy import BaseStrategy
@@ -94,7 +97,7 @@ def _save_registry(data: Dict[str, Any]) -> None:
 
 
 def _class_path_to_file(module_path: str) -> str:
-    """strategies.trend.strategy_21 → agents/etl/strategies/trend/strategy_21.py"""
+    """strategies.trend.strategy_21 → agents/signals/strategies/trend/strategy_21.py"""
     parts = module_path.split(".")
     if parts[0] != "strategies":
         raise SystemExit(

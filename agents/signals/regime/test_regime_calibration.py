@@ -7,8 +7,13 @@ import sys, os
 from dotenv import load_dotenv
 load_dotenv(os.path.expanduser('~/.hermes/profiles/qr_etl/env/etl.env'), override=True)
 
-sys.path.insert(0, '../shared/scripts')
-sys.path.insert(0, '.')
+# Signal-agent layout (post 2026-06-22 split): regime/ lives under signals/,
+# db.py lives under etl/shared/scripts/.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SIGNALS_ROOT = os.path.normpath(os.path.join(_HERE, '..'))
+_ETL_SHARED = os.path.normpath(os.path.join(_SIGNALS_ROOT, '..', 'etl', 'shared', 'scripts'))
+sys.path.insert(0, _ETL_SHARED)
+sys.path.insert(0, _HERE)
 
 import pandas as pd
 import psycopg2
