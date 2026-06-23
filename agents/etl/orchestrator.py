@@ -21,7 +21,9 @@ BRONZE = [
     ('yfinance_vix', 'bronze/yfinance/ingest_vix.py'),
     ('binance',  'bronze/binance/ingest_binance.py'),
     ('binance_funding_rates', 'bronze/binance/ingest_funding_rates.py'),
-    ('binance_crypto', 'bronze/binance/crypto_ingest.py'),
+    # 2026-06-22: removed 'binance_crypto' → bronze/binance/crypto_ingest.py
+    # That file was a duplicate of ingest_binance.py; daily_refresh.sh
+    # invokes shared/scripts/ingest_binance_crypto.py for crypto klines.
 ]
 
 SILVER = [

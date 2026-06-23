@@ -174,6 +174,25 @@ def ingest_funding_rates(symbols: list = None, days_back: int = 30):
     conn.close()
     print(f"✅ bronze.binance_funding_rates — {inserted} rows upserted")
 
+def _mark_freshness(error=None):
+    """Update gold.source_freshness for the operator dashboard. Soft-fails."""
+    try:
+        from db import get_connection
+        from freshness import mark_source_refreshed
+        conn = get_connection()
+        try:
+            mark_source_refreshed(conn, source='binance', error=error)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  (freshness write skipped: {e})")
+
+
 if __name__ == '__main__':
-    ingest_ohlcv()
-    ingest_funding_rates()
+    try:
+        ingest_ohlcv()
+        ingest_funding_rates()
+        _mark_freshness()
+    except Exception as e:
+        _mark_freshness(error=str(e))
+        raise
