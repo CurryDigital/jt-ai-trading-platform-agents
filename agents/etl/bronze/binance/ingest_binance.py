@@ -26,6 +26,12 @@ load_dotenv(os.path.expanduser('~/.hermes/profiles/qr_etl/env/etl.env'))
 from db import get_connection
 from datetime import datetime, timezone, timedelta
 
+# Module-level row-error tracking (2026-06-22): per-symbol `Row error: ...`
+# prints used to be exit-0 — now counted, with a threshold check at exit.
+_n_row_errors = 0
+_n_rows_attempted = 0
+ROW_ERROR_RATE_THRESHOLD = 0.05  # 5% of attempted rows
+
 try:
     import requests
 except ImportError:
@@ -89,6 +95,8 @@ def ingest_ohlcv(symbols: list = None, intervals: list = None, days_back: int = 
                 for k in klines:
                     ts = datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc)
                     try:
+                        global _n_rows_attempted
+                        _n_rows_attempted += 1
                         cur.execute("SAVEPOINT sp_ohlcv")
                         cur.execute("""
                             INSERT INTO bronze.binance_crypto_ohlcv
@@ -110,6 +118,8 @@ def ingest_ohlcv(symbols: list = None, intervals: list = None, days_back: int = 
                         inserted += 1
                         symbol_inserted += 1
                     except Exception as e:
+                        global _n_row_errors
+                        _n_row_errors += 1
                         cur.execute("ROLLBACK TO SAVEPOINT sp_ohlcv")
                         print(f"    Row error {symbol}/{interval} {ts}: {e}")
                 cur.close()
@@ -188,10 +198,23 @@ def _mark_freshness(error=None):
         print(f"  (freshness write skipped: {e})")
 
 
+def _check_row_error_rate():
+    if _n_rows_attempted == 0:
+        return
+    rate = _n_row_errors / _n_rows_attempted
+    print(f"\n  Row stats: {_n_row_errors} errors / {_n_rows_attempted} attempted "
+          f"({rate:.1%})  threshold={ROW_ERROR_RATE_THRESHOLD:.0%}")
+    if rate > ROW_ERROR_RATE_THRESHOLD:
+        print(f"  ⚠️ row error rate exceeds threshold — exiting non-zero")
+        _mark_freshness(error=f"row_error_rate={rate:.2%} ({_n_row_errors}/{_n_rows_attempted})")
+        sys.exit(1)
+
+
 if __name__ == '__main__':
     try:
         ingest_ohlcv()
         ingest_funding_rates()
+        _check_row_error_rate()
         _mark_freshness()
     except Exception as e:
         _mark_freshness(error=str(e))

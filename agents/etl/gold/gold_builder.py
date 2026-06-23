@@ -8,6 +8,12 @@
 """
 Gold Layer Builder
 Reads silver tables, writes enriched gold tables.
+
+2026-06-22: failures now propagate. _execute_sql() increments a module-level
+failure counter, and the if __name__ block at the bottom of this file calls
+sys.exit(_n_stage_failures). Previously: every stage caught its own exception,
+printed ❌, and the script exited 0 — operator dashboards showed green while
+half the gold tables were stale.
 """
 import sys, os
 sys.path.insert(0, 'shared/scripts')
@@ -17,16 +23,30 @@ from datetime import date
 import math
 
 
-def _execute_sql(label: str, sql: str):
+# Module-level failure tracking. Each _execute_sql() call increments on
+# exception; main() inspects this at the end and exits with the count.
+_n_stage_failures = 0
+_failed_stages: list[str] = []
+
+
+def _execute_sql(label: str, sql: str) -> bool:
+    """Run a single gold-layer stage. Returns True on success, False on failure.
+    The failure counter ensures the script's exit code reflects reality even
+    if no caller checks the return value."""
+    global _n_stage_failures
     conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute(sql)
         conn.commit()
         print(f"✅ {label}")
+        return True
     except Exception as e:
         print(f"❌ {label}: {e}")
         conn.rollback()
+        _n_stage_failures += 1
+        _failed_stages.append(label)
+        return False
     finally:
         conn.close()
 
@@ -214,3 +234,7 @@ def build_regime_label():
 
 if __name__ == "__main__":
     build_all()
+    if _n_stage_failures:
+        print(f"\n⚠️  gold_builder: {_n_stage_failures} stage(s) failed: {_failed_stages}")
+        sys.exit(_n_stage_failures)
+    print("\n✅ gold_builder: all stages OK")
