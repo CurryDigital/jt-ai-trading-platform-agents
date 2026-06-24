@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-freshness.py — write per-source freshness rows after a successful bronze ingest.
+freshness.py — write per-source freshness rows after a successful build.
 
 Pairs with db_setup/migrations/001_source_freshness.sql which created
-gold.source_freshness (one row per bronze source) and the gold.v_source_freshness
-view. Bronze scripts call mark_source_refreshed() at the end of main() on the
-happy path so the operator can SELECT a single view to see which sources are
-overdue.
+gold.source_freshness (one row per source) and gold.v_source_freshness.
 
-Contract (kept tiny on purpose — should be a 3-line call site addition):
+2026-06-22: helper does INSERT … ON CONFLICT DO UPDATE so derived
+gold-table builders (not just bronze sources) work without a separate
+seed migration. The asset_class / expected_frequency / staleness fields
+are only set when the row didn't already exist; subsequent calls leave
+those columns alone (they're operator-tunable).
+
+Contract (kept tiny on purpose — a 3-line call site addition):
 
     from freshness import mark_source_refreshed
     mark_source_refreshed(conn, source='yfinance', max_date=last_business_day)
     # or, on a tracked failure that should still bump last_checked_at:
     mark_source_refreshed(conn, source='yfinance', error='HTTP 503 from api')
 
-If gold.source_freshness or its row is missing, the helper logs a warning and
-returns False instead of raising. This means a bronze script that ships before
-the migration is applied still runs; once the migration lands, freshness starts
-populating automatically on next run.
+Soft-fails on missing-table — bronze scripts that ship before the
+migration is applied still run.
 """
 
 from __future__ import annotations
@@ -33,18 +34,18 @@ def mark_source_refreshed(
     source: str,
     max_date: Optional[_date] = None,
     error: Optional[str] = None,
+    asset_class: Optional[str] = None,
+    expected_frequency: str = "daily",
+    expected_max_staleness_hours: int = 30,
 ) -> bool:
     """
     Upsert a freshness row for `source`. Returns True on success, False on a
-    soft failure that should NOT crash the calling bronze script.
+    soft failure that should NOT crash the caller.
 
-    - On success path: pass `max_date` (the latest business date the source
-      now covers). `last_refreshed_at` is bumped to NOW().
-    - On a tracked failure: pass `error` (last_error gets the message,
-      last_refreshed_at is NOT bumped, last_checked_at IS bumped).
-
-    The function never raises on missing-table / missing-row — those are
-    deploy-order issues that should not block bronze ingestion.
+    - Success path: pass `max_date` (the latest business date the source now
+      covers). last_refreshed_at is bumped to NOW(); last_error cleared.
+    - Tracked-failure path: pass `error` (last_error stored; last_refreshed_at
+      is NOT bumped, last_checked_at IS bumped).
     """
     now = datetime.now(timezone.utc)
 
@@ -53,43 +54,42 @@ def mark_source_refreshed(
             if error is not None:
                 cur.execute(
                     """
-                    UPDATE gold.source_freshness
-                    SET last_checked_at = %s,
-                        last_error      = %s
-                    WHERE source = %s
+                    INSERT INTO gold.source_freshness
+                        (source, asset_class, expected_frequency,
+                         expected_max_staleness_hours, last_checked_at, last_error)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (source) DO UPDATE SET
+                        last_checked_at = EXCLUDED.last_checked_at,
+                        last_error      = EXCLUDED.last_error
                     """,
-                    (now, str(error)[:1000], source),
+                    (source, asset_class, expected_frequency,
+                     expected_max_staleness_hours, now, str(error)[:1000]),
                 )
             else:
                 cur.execute(
                     """
-                    UPDATE gold.source_freshness
-                    SET max_date          = COALESCE(%s, max_date),
-                        last_refreshed_at = %s,
-                        last_checked_at   = %s,
+                    INSERT INTO gold.source_freshness
+                        (source, asset_class, expected_frequency,
+                         expected_max_staleness_hours,
+                         max_date, last_refreshed_at, last_checked_at, last_error)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, NULL)
+                    ON CONFLICT (source) DO UPDATE SET
+                        max_date          = COALESCE(EXCLUDED.max_date, gold.source_freshness.max_date),
+                        last_refreshed_at = EXCLUDED.last_refreshed_at,
+                        last_checked_at   = EXCLUDED.last_checked_at,
                         last_error        = NULL
-                    WHERE source = %s
                     """,
-                    (max_date, now, now, source),
+                    (source, asset_class, expected_frequency,
+                     expected_max_staleness_hours, max_date, now, now),
                 )
-
-            updated = cur.rowcount
         conn.commit()
-
-        if updated == 0:
-            print(
-                f"freshness: source={source!r} not in gold.source_freshness — "
-                f"add a seed row (see db_setup/migrations/001_source_freshness.sql) "
-                f"or run the migration.",
-                file=sys.stderr,
-            )
-            return False
         return True
 
     except Exception as e:
-        # Soft-fail: the bronze script's own data write already succeeded.
-        # We don't want a freshness-table issue to roll that back.
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         print(
             f"freshness: failed to mark source={source!r}: {e}. "
             f"Has db_setup/migrations/001_source_freshness.sql been applied?",
