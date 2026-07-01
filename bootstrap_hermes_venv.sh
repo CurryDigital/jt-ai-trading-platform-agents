@@ -4,8 +4,11 @@
 # Idempotent provisioning of the Hermes ETL Python virtualenv.
 #
 # Run this on the host that executes daily_refresh.sh. It:
-#   1. Locates the Hermes venv (defaults to ~/.hermes/hermes-agent/venv)
-#   2. Verifies the venv exists; creates it from system python3 if not
+#   1. Locates the Hermes venv (defaults to ~/.hermes/hermes-agent/venv —
+#      hardcoded to match daily_refresh.sh:34 / run_signal_cycle.sh, NOT
+#      derived from a $HERMES_HOME-style env var — see 2026-06-25 note below)
+#   2. Verifies the venv exists; creates it from a version-pinned python3.x
+#      if not (see PYTHON_CANDIDATES — numba/hmmlearn cap at Python <3.14)
 #   3. Upgrades pip + setuptools + wheel
 #   4. Installs everything in agents/etl/requirements.txt
 #   5. Smoke-tests the imports the daily cron actually needs
@@ -13,22 +16,39 @@
 #
 # Designed to be safe to re-run. Use --check to validate without installing.
 #
+# 2026-06-25 FIX: the original script read defaults from $HERMES_HOME
+# ("${HERMES_HOME:-$HOME/.hermes}"). On the actual Hermes box, the qr_etl
+# profile's own env file already exports HERMES_HOME=/home/ubuntu/.hermes/
+# profiles/qr_etl (pointing at the PROFILE dir, not the shared venv dir).
+# This script silently inherited that value, computed the wrong venv path
+# (.../profiles/qr_etl/hermes-agent/venv instead of .../hermes-agent/venv),
+# found nothing there, and created a FRESH venv using bare `python3` — which
+# resolved to system Python 3.14, too new for numba (requires <3.14). Fixed
+# by hardcoding the known-good absolute path and pinning the interpreter
+# search to 3.10-3.13. Override only via the explicit --venv flag or the
+# BOOTSTRAP_ETL_VENV env var (deliberately NOT named anything Hermes profile
+# env files are likely to already set).
+#
 # Exit codes:
 #   0  — venv is good
 #   64 — usage error (bad args)
-#   65 — venv directory unwriteable or system python3 missing
+#   65 — venv directory unwriteable or no compatible python3.x found
 #   70 — install failed
 #   71 — smoke test failed after install (genuine bug — escalate)
 
 set -uo pipefail
 
-# ── Defaults (override via env vars) ─────────────────────────────────────
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-VENV_DIR="${HERMES_VENV:-$HERMES_HOME/hermes-agent/venv}"
-PROFILE_VENV_DIR="${HERMES_PROFILE_VENV:-$HERMES_HOME/profiles/qr_etl/venv}"
+# ── Defaults (hardcoded — do NOT derive from ambient $HERMES_HOME; see
+#    2026-06-25 note above) ────────────────────────────────────────────────
+VENV_DIR="${BOOTSTRAP_ETL_VENV:-/home/ubuntu/.hermes/hermes-agent/venv}"
+PROFILE_VENV_DIR="${BOOTSTRAP_ETL_PROFILE_VENV:-/home/ubuntu/.hermes/profiles/qr_etl/venv}"
 REQUIREMENTS="${ETL_REQUIREMENTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/agents/etl/requirements.txt}"
 CHECK_ONLY=false
 INSTALL_PROFILE_VENV=false
+
+# numba (a hmmlearn/scikit-learn transitive dep) caps supported Python at
+# <3.14. Tried newest-supported-first so we don't pin unnecessarily low.
+PYTHON_CANDIDATES=(python3.13 python3.12 python3.11 python3.10)
 
 # ── Argparse ─────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -79,15 +99,35 @@ print('OK — all required imports succeed')
     return 0
 }
 
+find_compatible_python() {
+    local cand
+    for cand in "${PYTHON_CANDIDATES[@]}"; do
+        if command -v "$cand" >/dev/null 2>&1; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
 provision_venv() {
     local venv="$1"
     if [[ -x "$venv/bin/python3" ]]; then
         log "Found existing venv: $venv"
+        local existing_version
+        existing_version=$("$venv/bin/python3" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || echo "unknown")
+        log "  Python version: $existing_version (leaving venv as-is — never re-created if it already exists)"
         return 0
     fi
-    log "Creating venv at $venv"
+
+    local py_bin
+    py_bin=$(find_compatible_python) || fail \
+        "no compatible Python found (need one of: ${PYTHON_CANDIDATES[*]}, numba requires <3.14). \
+Install one, e.g.: sudo apt install python3.11 python3.11-venv" 65
+
+    log "Creating venv at $venv using $py_bin ($("$py_bin" --version 2>&1))"
     mkdir -p "$(dirname "$venv")" || fail "cannot mkdir $(dirname "$venv")" 65
-    python3 -m venv "$venv" || fail "python3 -m venv failed (check system python3-venv package)" 65
+    "$py_bin" -m venv "$venv" || fail "$py_bin -m venv failed (check that venv package is installed for $py_bin)" 65
 }
 
 install_deps() {
