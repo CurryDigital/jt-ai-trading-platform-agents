@@ -2,7 +2,8 @@
 """
 Consumption: Command Tab — Stocks Overview & Top Opportunities
 Reads from: gold.kpis_metrics, gold.asset_registry, gold.strategy_ticker_scores,
-            gold.strategy_definitions
+            gold.strategy_registry (opportunities ranking — sharpe_oos, name),
+            gold.strategy_definitions (summary card count only — status column)
 Writes to:  consumption.markets_stocks_overview,
             consumption.dashboard_opportunities_top,
             consumption.dashboard_summary_cards
@@ -81,6 +82,14 @@ ON CONFLICT (ticker) DO UPDATE SET
   updated_at       = NOW();
 """
 
+# 2026-07-01: was joining gold.strategy_definitions, which has NO
+# sharpe_ratio column at all, and no `name` column either (it's
+# `strategy_name` there) — both would UndefinedColumn. Verified against
+# db_setup/DDL_full_schema.sql: gold.strategy_registry has strategy_id,
+# name, AND sharpe_oos (the strategy's real out-of-sample performance —
+# the semantically correct source for "expected_return_pct", not a
+# per-ticker technical-indicator table that happens to also have a column
+# called sharpe_ratio for something unrelated).
 SQL_OPPORTUNITIES = """
 DELETE FROM consumption.dashboard_opportunities_top;
 
@@ -92,17 +101,17 @@ SELECT
   sts.ticker,
   ar.name,
   ar.asset_class,
-  sd.strategy_id AS signal_type,
+  sr.strategy_id AS signal_type,
   'LONG' AS direction,
   sts.score / 100 AS confidence,
-  sd.sharpe_ratio AS expected_return_pct,
+  sr.sharpe_oos AS expected_return_pct,
   k.close AS entry_price,
   k.close * 0.97 AS stop_loss,
   k.close * 1.05 AS take_profit,
-  sd.name AS rationale,
+  sr.name AS rationale,
   NOW()
 FROM gold.strategy_ticker_scores sts
-JOIN gold.strategy_definitions sd USING (strategy_id)
+JOIN gold.strategy_registry sr USING (strategy_id)
 JOIN gold.asset_registry ar ON ar.ticker = sts.ticker
 JOIN (
   SELECT DISTINCT ON (ticker) ticker, close
@@ -134,27 +143,36 @@ ON CONFLICT (card_key) DO UPDATE SET
 def run():
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT to_regclass('gold.strategy_definitions')")
-    if cur.fetchone()[0] is None:
-        print("⚠️ gold.strategy_definitions does not exist — skipping")
-        conn.close()
-        return
-    cur.execute("SELECT COUNT(*) FROM gold.strategy_definitions")
-    if cur.fetchone()[0] == 0:
-        print("⚠️ gold.strategy_definitions empty — skipping")
-        conn.close()
-        return
+
     cur.execute(SQL_STOCKS)
     print(f"✅ consumption.markets_stocks_overview: {cur.rowcount} rows upserted")
+
     # 2026-07-01: SQL_OPPORTUNITIES was defined above but never executed —
     # consumption.dashboard_opportunities_top has been permanently empty.
     # Reuses the same DISTINCT ON (ticker, date DESC) pattern already proven
     # safe/indexed in latest_kpis (idx_kpis_ticker_date_desc), bounded to
     # LIMIT 10, so this shouldn't meaningfully add to this script's runtime.
-    cur.execute(SQL_OPPORTUNITIES)
-    print(f"✅ consumption.dashboard_opportunities_top: {cur.rowcount} rows inserted")
+    #
+    # Guard moved here (was previously wrapping the WHOLE function, checking
+    # gold.strategy_definitions — a table SQL_STOCKS and SQL_SUMMARY don't
+    # even reference, so a missing/empty strategy_definitions used to skip
+    # everything unnecessarily). Now gates only the one query that actually
+    # needs its dependency, and checks the table it now really joins:
+    # gold.strategy_registry.
+    cur.execute("SELECT to_regclass('gold.strategy_registry')")
+    if cur.fetchone()[0] is None:
+        print("⚠️ gold.strategy_registry does not exist — skipping dashboard_opportunities_top")
+    else:
+        cur.execute("SELECT COUNT(*) FROM gold.strategy_registry")
+        if cur.fetchone()[0] == 0:
+            print("⚠️ gold.strategy_registry empty — skipping dashboard_opportunities_top")
+        else:
+            cur.execute(SQL_OPPORTUNITIES)
+            print(f"✅ consumption.dashboard_opportunities_top: {cur.rowcount} rows inserted")
+
     cur.execute(SQL_SUMMARY)
     print(f"✅ consumption.dashboard_summary_cards: {cur.rowcount} rows upserted")
+
     conn.commit()
     conn.close()
 
