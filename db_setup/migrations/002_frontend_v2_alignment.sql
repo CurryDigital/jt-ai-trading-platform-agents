@@ -462,30 +462,41 @@ LEFT JOIN gold.strategy_registry sr
 ORDER BY sl.logged_at DESC;
 
 -- §5.2 execution views — read-only over IBKR sync tables
+-- 2026-07-01 CORRECTED (see migration 003 for the story): the original
+-- version of this view pointed at gold.ib_orders, guessing column names
+-- (order_id, side, venue, submitted_at) from the API_SPEC_v2.md wire format
+-- without the real DDL. Verification found gold.ib_orders has ZERO writers
+-- anywhere in agents/etl/ — an orphaned table. The actively-synced table is
+-- gold.ibkr_orders (written by gold/promote_ibkr_orders.py and
+-- sync_ibkr_to_gold.py), which already has a real order_id column.
 CREATE OR REPLACE VIEW consumption.execution_order_queue AS
 SELECT
-    order_id::VARCHAR  AS order_id,
+    order_id,
     ticker,
-    side,
-    quantity::NUMERIC  AS qty,
+    action                 AS side,
+    quantity::NUMERIC      AS qty,
     order_type,
     status,
-    venue,
-    submitted_at AS ts
-FROM gold.ib_orders
-WHERE status IN ('pending','working','partially_filled')
-ORDER BY submitted_at DESC;
+    'IBKR'::VARCHAR         AS venue,     -- every row in this table is an IBKR order — true, not fabricated
+    submit_time             AS ts
+FROM gold.ibkr_orders
+WHERE status IN ('Submitted','PreSubmitted','PendingSubmit','ApiPending')
+ORDER BY submit_time DESC;
 
+-- 2026-07-01 CORRECTED: gold.trade_executions was the right table, but the
+-- guessed column names (execution_id, fill_price, broker_ref, reconciled)
+-- don't match the real schema (id, price; no broker_ref/reconciled columns
+-- exist at all — reconciliation against broker statements isn't implemented).
 CREATE OR REPLACE VIEW consumption.execution_fills AS
 SELECT
-    execution_id::VARCHAR  AS fill_id,
-    order_id::VARCHAR      AS order_id,
+    id::VARCHAR             AS fill_id,
+    ibkr_order_id::VARCHAR   AS order_id,
     ticker,
-    quantity::NUMERIC      AS qty,
-    fill_price::NUMERIC    AS price,
-    broker_ref::VARCHAR    AS broker_ref,
-    reconciled             AS matched,
-    executed_at            AS ts
+    quantity::NUMERIC       AS qty,
+    price::NUMERIC           AS price,
+    NULL::VARCHAR            AS broker_ref,  -- not captured anywhere yet — honest NULL, not fabricated
+    NULL::BOOLEAN            AS matched,     -- broker-statement reconciliation not implemented — honest NULL
+    executed_at              AS ts
 FROM gold.trade_executions
 ORDER BY executed_at DESC;
 
