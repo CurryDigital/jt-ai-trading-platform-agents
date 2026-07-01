@@ -480,7 +480,16 @@ SELECT
     'IBKR'::VARCHAR         AS venue,     -- every row in this table is an IBKR order — true, not fabricated
     submit_time             AS ts
 FROM gold.ibkr_orders
-WHERE status IN ('Submitted','PreSubmitted','PendingSubmit','ApiPending')
+-- Status vocabulary corrected 2026-07-01 (see migration 004): this is
+-- IBKR's actual TWS API OrderStatus enum, not a guess. 'ApiPending' in
+-- the original version of this filter was fabricated — no such IBKR
+-- status exists. PendingCancel is included deliberately: a cancel
+-- request in flight is NOT a terminal state (the order may still fill
+-- before the cancel is confirmed), so hiding it from an Order Queue
+-- panel would mask exactly the "why hasn't my cancel gone through"
+-- visibility the panel exists for. Excluded (terminal): Cancelled,
+-- ApiCancelled, Filled (use execution_fills for those), Inactive.
+WHERE status IN ('PendingSubmit','PendingCancel','PreSubmitted','Submitted')
 ORDER BY submit_time DESC;
 
 -- 2026-07-01 CORRECTED: gold.trade_executions was the right table, but the

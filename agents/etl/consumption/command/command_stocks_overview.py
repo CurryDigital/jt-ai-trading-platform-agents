@@ -146,6 +146,13 @@ def run():
         return
     cur.execute(SQL_STOCKS)
     print(f"✅ consumption.markets_stocks_overview: {cur.rowcount} rows upserted")
+    # 2026-07-01: SQL_OPPORTUNITIES was defined above but never executed —
+    # consumption.dashboard_opportunities_top has been permanently empty.
+    # Reuses the same DISTINCT ON (ticker, date DESC) pattern already proven
+    # safe/indexed in latest_kpis (idx_kpis_ticker_date_desc), bounded to
+    # LIMIT 10, so this shouldn't meaningfully add to this script's runtime.
+    cur.execute(SQL_OPPORTUNITIES)
+    print(f"✅ consumption.dashboard_opportunities_top: {cur.rowcount} rows inserted")
     cur.execute(SQL_SUMMARY)
     print(f"✅ consumption.dashboard_summary_cards: {cur.rowcount} rows upserted")
     conn.commit()

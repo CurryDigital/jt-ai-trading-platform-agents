@@ -135,17 +135,31 @@ run_gold() {
     fi
 }
 
+# 2026-07-01: per-script timeout overrides for consumption scripts that do
+# real cross-table analytics (not thin passthrough views) and legitimately
+# take longer than the default 30s. Confirmed via direct standalone timing
+# (not guessed): command_stocks_overview.py = 105.97s wall clock, exit 0,
+# 845 rows correctly upserted — a real result, not a hang. 30s was killing
+# a working query every day. Override budget reuses GOLD_TIMEOUT's 180s
+# ceiling (an existing precedent in this file) for ~70s headroom over the
+# observed baseline. Keyed by the exact relative path passed to
+# run_consumption below (consumption/<tab>/<script>.py).
+declare -A CONSUMPTION_TIMEOUT_OVERRIDES=(
+    ["consumption/command/command_stocks_overview.py"]=180
+)
+
 run_consumption() {
     local name="$1"
     local script="$2"
-    echo "→ ${name}..."
-    if timeout -k 10s ${CONSUMPTION_TIMEOUT}s "${PYTHON}" "${script}"; then
+    local timeout_s="${CONSUMPTION_TIMEOUT_OVERRIDES[$script]:-$CONSUMPTION_TIMEOUT}"
+    echo "→ ${name}... (budget ${timeout_s}s)"
+    if timeout -k 10s ${timeout_s}s "${PYTHON}" "${script}"; then
         echo "  ✅ ${name} complete"
         OK_CONSUMPTION+=("${name}")
     else
         local exit_code=$?
         if [ $exit_code -eq 124 ]; then
-            echo "  ⏱️ ${name} TIMEOUT after ${CONSUMPTION_TIMEOUT}s"
+            echo "  ⏱️ ${name} TIMEOUT after ${timeout_s}s"
         else
             echo "  ⚠️ ${name} FAILED (exit $exit_code)"
         fi
