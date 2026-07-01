@@ -2,26 +2,19 @@
 """Silver promotion: bronze.ibkr_account_summary → silver.asset_registry + silver.unified_prices"""
 import os
 import sys
-import psycopg2
 from datetime import datetime, timezone
 
-sys.path.insert(0, '/home/ubuntu/.hermes/profiles/qr_etl/home/trading-platform/agents/etl/shared/scripts')
+# Use the canonical pooled connection. db.py is on PYTHONPATH when invoked
+# via daily_refresh.sh; the explicit sys.path insert below makes the script
+# also runnable directly for ops.
+HERE = os.path.dirname(os.path.abspath(__file__))
+SHARED = os.path.normpath(os.path.join(HERE, '..', 'shared', 'scripts'))
+sys.path.insert(0, SHARED)
 
-# Load Hermes env file
-from dotenv import load_dotenv
-load_dotenv(os.path.expanduser('~/.hermes/profiles/qr_etl/env/etl.env'))
+from db import get_connection
 
-DB_HOST = os.environ.get('DB_HOST', 'openclaw.cjs04usueagu.ap-southeast-1.rds.amazonaws.com')
-DB_PORT = int(os.environ.get('DB_PORT', 5432))
-DB_NAME = os.environ.get('DB_NAME', 'aitrading')
-DB_USER = os.environ.get('DB_USER', 'openclaw_user')
-DB_PASSWORD = os.environ.get('DB_PASSWORD', '')
-
-def get_conn():
-    return psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD
-    )
+# Back-compat alias for the rest of this file.
+get_conn = get_connection
 
 def promote_ibkr_account_summary():
     """Promote bronze.ibkr_account_summary to silver.asset_registry (cash positions)"""

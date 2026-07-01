@@ -11,7 +11,15 @@ Export:
     get_active_strategies(conn) -> dict
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+
+# Signal-agent layout (post 2026-06-22 split):
+#   agents/signals/regime/regime_rules.py  ← this file
+#   agents/etl/shared/scripts/db.py         ← canonical DB pool (cross-agent dep)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SIGNALS_ROOT = os.path.normpath(os.path.join(_HERE, '..'))
+_ETL_SHARED = os.path.normpath(os.path.join(_SIGNALS_ROOT, '..', 'etl', 'shared', 'scripts'))
+if _SIGNALS_ROOT not in sys.path: sys.path.insert(0, _SIGNALS_ROOT)
+if _ETL_SHARED not in sys.path: sys.path.insert(0, _ETL_SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 from datetime import date
@@ -21,14 +29,40 @@ import pandas as pd
 
 
 # ── Strategy Router ───────────────────────────────────────────────────────────
+#
+# STRATEGY_MAP is derived from strategies/registry.json (2026-06-22). The
+# previous hardcoded dict listed BOTH real strategies AND stubs that return
+# signal=0 — every regime cycle invoked 13 no-op classes for no reason.
+# Now the map contains only enabled strategies; disabled ones are still in
+# the registry for visibility but won't gate-in. Edit registry.json to add
+# or disable strategies; this file picks up the change on next import.
 
-STRATEGY_MAP = {
-    'TREND'   : [1, 2, 6, 11, 15, 16, 18],
-    'MEAN_REV': [3, 5, 8, 10, 13, 14, 19, 20],
-    'CARRY'   : [7, 17],
-    'EVENT'   : [4, 12],
-    'FLAT'    : []
-}
+def _load_strategy_map():
+    """Compute STRATEGY_MAP from the registry. Falls back to the legacy
+    hardcoded map if the loader is unavailable (e.g. registry.json missing
+    during a partial deploy) so this module never fails to import."""
+    legacy = {
+        'TREND'   : [1, 2, 6, 11, 15, 16, 18],
+        'MEAN_REV': [3, 5, 8, 10, 13, 14, 19, 20],
+        'CARRY'   : [7, 17],
+        'EVENT'   : [4, 12],
+        'FLAT'    : [],
+    }
+    try:
+        # _SIGNALS_ROOT was already added to sys.path at module top.
+        from strategies.registry_loader import build_strategy_map
+        return build_strategy_map()
+    except Exception as e:
+        import sys
+        print(
+            f"WARNING regime_rules: falling back to legacy STRATEGY_MAP "
+            f"(registry_loader failed: {e})",
+            file=sys.stderr,
+        )
+        return legacy
+
+
+STRATEGY_MAP = _load_strategy_map()
 
 VALID_REGIMES = {'TREND', 'MEAN_REV', 'CARRY', 'EVENT', 'FLAT'}
 

@@ -20,6 +20,11 @@ except ImportError as e:
     print(f"⚠️  Missing dependency: {e} — run: pip install requests yfinance")
     sys.exit(1)
 
+# Module-level row-error tracking (2026-06-22).
+_n_row_errors = 0
+_n_rows_attempted = 0
+ROW_ERROR_RATE_THRESHOLD = 0.05
+
 HKEX_IPO_URL = 'https://www.hkex.com.hk/eng/services/trading/securities/newlist/ipolist.aspx'
 
 def get_pending_ipos(conn) -> list:
@@ -74,6 +79,11 @@ def ingest_ipo_calendar(manual_entries: list = None):
             ))
             inserted += 1
         except Exception as e:
+            global _n_row_errors
+            _n_row_errors += 1
+            # Roll back so the broken row doesn't poison the connection
+            # state for subsequent IPO entries in the same batch.
+            conn.rollback()
             print(f"    IPO entry error: {e}")
 
     conn.commit()
@@ -128,6 +138,7 @@ def ingest_ipo_prices(days_of_history: int = 90):
                     inserted += 1
                     days_since += 1
                 except Exception as e:
+                    _n_row_errors += 1
                     print(f"    Row error {ticker} {ts}: {e}")
         except Exception as e:
             print(f"  Price error {yf_ticker}: {e}")
@@ -181,7 +192,40 @@ def ingest_ipo_prospectus(manual_entries: list = None):
     print(f"✅ bronze.hkex_ipo_prospectus_raw — {inserted} rows upserted")
 
 
+
+
+def _mark_freshness(error=None):
+    """Update gold.source_freshness for the operator dashboard. Soft-fails."""
+    try:
+        from db import get_connection
+        from freshness import mark_source_refreshed
+        conn = get_connection()
+        try:
+            mark_source_refreshed(conn, source='hkex', error=error)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  (freshness write skipped: {e})")
+
+
+def _check_row_error_rate():
+    if _n_row_errors == 0:
+        return
+    # HKEX has small batches; absolute count matters more than ratio.
+    print(f"\n  HKEX row errors: {_n_row_errors}")
+    if _n_row_errors > 5:
+        print(f"  ⚠️ {_n_row_errors} row errors exceeds threshold (5) — exiting non-zero")
+        _mark_freshness(error=f"row_errors={_n_row_errors}")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    ingest_ipo_calendar()
-    ingest_ipo_prices()
-    ingest_ipo_prospectus()
+    try:
+        ingest_ipo_calendar()
+        ingest_ipo_prices()
+        ingest_ipo_prospectus()
+        _check_row_error_rate()
+        _mark_freshness()
+    except Exception as e:
+        _mark_freshness(error=str(e))
+        raise

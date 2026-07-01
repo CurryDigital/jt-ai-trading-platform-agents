@@ -31,7 +31,8 @@ BRONZE = [
 ]
 
 SILVER = [
-    ('clean_prices', 'silver/clean_prices.py'),
+    # 2026-06-22: clean_prices.py was a duplicate; canonical is clean_unified_prices.py.
+    ('clean_prices', 'silver/clean_unified_prices.py'),
 ]
 
 GOLD = [
@@ -108,8 +109,17 @@ def run_stage(name: str, scripts: list, log_file, retries: int = 1) -> dict:
 
 
 def get_today_regime() -> dict:
-    """Fetch today's regime from the database."""
+    """Fetch today's regime from the database.
+
+    Note: imports regime/regime_rules from the signals agent (split out from
+    ETL on 2026-06-22). This is a read-only display call — etl uses it to
+    annotate the run log with which strategies the signal agent will gate-in
+    later. If you'd rather avoid the cross-agent reach, replace this with a
+    SELECT on gold.regime_label."""
     sys.path.insert(0, SHARED)
+    _SIGNALS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'signals'))
+    if _SIGNALS_DIR not in sys.path:
+        sys.path.insert(0, _SIGNALS_DIR)
     os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
     from db import get_connection
     from regime.regime_rules import get_active_strategies

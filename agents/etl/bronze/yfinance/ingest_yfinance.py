@@ -61,10 +61,22 @@ def get_commodity_tickers(conn) -> list:
         'ZW=F', 'ZS=F', 'ZC=F', 'KC=F', 'SB=F'
     ]
 
+# Module-level row-error tracking. Each _upsert_* increments _n_row_errors
+# on individual row failures; if the rate crosses 5% of attempts, main() at
+# bottom of file exits non-zero so cron + gold.source_freshness see the truth.
+_n_row_errors = 0
+_n_rows_attempted = 0
+ROW_ERROR_RATE_THRESHOLD = 0.05  # 5% of attempted rows
+
+
 def _upsert_prices(cur, ticker, df):
-    """Upsert a single ticker's price DataFrame. Returns inserted count."""
+    """Upsert a single ticker's price DataFrame. Returns inserted count.
+    Row-level failures still continue (one bad row should not stop a 100-row
+    batch) but are tracked at module level — see top-of-file exit gate."""
+    global _n_row_errors, _n_rows_attempted
     inserted = 0
     for _, row in df.iterrows():
+        _n_rows_attempted += 1
         try:
             cur.execute("""
                 INSERT INTO bronze.yf_prices
@@ -87,6 +99,7 @@ def _upsert_prices(cur, ticker, df):
             ))
             inserted += 1
         except Exception as e:
+            _n_row_errors += 1
             print(f"    Row error {ticker}: {e}")
     return inserted
 
@@ -302,8 +315,43 @@ def ingest_institutional_holdings(tickers: list = None):
     print(f"✅ bronze.institutional_holdings — {inserted} rows upserted")
 
 
+def _mark_freshness(error=None):
+    """Update gold.source_freshness for the operator dashboard. Soft-fails."""
+    try:
+        from db import get_connection
+        from freshness import mark_source_refreshed
+        conn = get_connection()
+        try:
+            mark_source_refreshed(conn, source='yfinance', error=error)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  (freshness write skipped: {e})")
+
+
+def _check_row_error_rate():
+    """Exit non-zero if too many rows failed — masks would otherwise hide
+    behind individual `Row error {ticker}: ...` prints."""
+    if _n_rows_attempted == 0:
+        return
+    rate = _n_row_errors / _n_rows_attempted
+    print(f"\n  Row stats: {_n_row_errors} errors / {_n_rows_attempted} attempted "
+          f"({rate:.1%})  threshold={ROW_ERROR_RATE_THRESHOLD:.0%}")
+    if rate > ROW_ERROR_RATE_THRESHOLD:
+        print(f"  ⚠️ row error rate exceeds threshold — exiting non-zero")
+        _mark_freshness(error=f"row_error_rate={rate:.2%} ({_n_row_errors}/{_n_rows_attempted})")
+        import sys
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    ingest_yf_prices()
-    ingest_commodity_futures()
-    # ingest_earnings_calendar()      # deferred — too slow for 120s timeout
-    # ingest_institutional_holdings() # deferred — too slow for 120s timeout
+    try:
+        ingest_yf_prices()
+        ingest_commodity_futures()
+        # ingest_earnings_calendar()      # deferred — too slow for 120s timeout
+        # ingest_institutional_holdings() # deferred — too slow for 120s timeout
+        _check_row_error_rate()
+        _mark_freshness()
+    except Exception as e:
+        _mark_freshness(error=str(e))
+        raise

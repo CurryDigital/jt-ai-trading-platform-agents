@@ -8,6 +8,12 @@
 """
 Gold Layer Builder
 Reads silver tables, writes enriched gold tables.
+
+2026-06-22: failures now propagate. _execute_sql() increments a module-level
+failure counter, and the if __name__ block at the bottom of this file calls
+sys.exit(_n_stage_failures). Previously: every stage caught its own exception,
+printed ❌, and the script exited 0 — operator dashboards showed green while
+half the gold tables were stale.
 """
 import sys, os
 sys.path.insert(0, 'shared/scripts')
@@ -17,16 +23,30 @@ from datetime import date
 import math
 
 
-def _execute_sql(label: str, sql: str):
+# Module-level failure tracking. Each _execute_sql() call increments on
+# exception; main() inspects this at the end and exits with the count.
+_n_stage_failures = 0
+_failed_stages: list[str] = []
+
+
+def _execute_sql(label: str, sql: str) -> bool:
+    """Run a single gold-layer stage. Returns True on success, False on failure.
+    The failure counter ensures the script's exit code reflects reality even
+    if no caller checks the return value."""
+    global _n_stage_failures
     conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute(sql)
         conn.commit()
         print(f"✅ {label}")
+        return True
     except Exception as e:
         print(f"❌ {label}: {e}")
         conn.rollback()
+        _n_stage_failures += 1
+        _failed_stages.append(label)
+        return False
     finally:
         conn.close()
 
@@ -185,10 +205,14 @@ def build_regime_features():
     mod.compute_features()
 
 def build_hmm_regime():
-    """Goal 3: Train HMM regime model"""
+    """Goal 3: Train HMM regime model.
+    Note: regime/ moved to agents/signals/regime/ on 2026-06-22. The path
+    below crosses the etl→signals boundary because HMM training reads
+    gold-layer features and writes back to gold — it's data-engineering
+    work that happens to live with the signal agent for code locality."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("train_hmm",
-        os.path.join(os.path.dirname(__file__), "..", "regime", "train_hmm.py"))
+        os.path.join(os.path.dirname(__file__), "..", "..", "signals", "regime", "train_hmm.py"))
     if spec is None or spec.loader is None:
         raise RuntimeError("Failed to load train_hmm module spec")
     mod = importlib.util.module_from_spec(spec)
@@ -196,10 +220,11 @@ def build_hmm_regime():
     mod.train_hmm()
 
 def build_regime_label():
-    """Goal 4: Build regime label with rule overrides"""
+    """Goal 4: Build regime label with rule overrides.
+    Note: regime/ moved to agents/signals/regime/ on 2026-06-22."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("regime_rules",
-        os.path.join(os.path.dirname(__file__), "..", "regime", "regime_rules.py"))
+        os.path.join(os.path.dirname(__file__), "..", "..", "signals", "regime", "regime_rules.py"))
     if spec is None or spec.loader is None:
         raise RuntimeError("Failed to load regime_rules module spec")
     mod = importlib.util.module_from_spec(spec)
@@ -209,3 +234,7 @@ def build_regime_label():
 
 if __name__ == "__main__":
     build_all()
+    if _n_stage_failures:
+        print(f"\n⚠️  gold_builder: {_n_stage_failures} stage(s) failed: {_failed_stages}")
+        sys.exit(_n_stage_failures)
+    print("\n✅ gold_builder: all stages OK")

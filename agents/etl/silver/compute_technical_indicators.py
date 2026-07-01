@@ -14,9 +14,28 @@ sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
+# TODO (2026-06-22): port the incremental ticker-filter from the deleted
+# clean_technical_indicators.py to speed up daily runs:
+#
+#   WITH tickers_to_update AS (
+#     SELECT DISTINCT p.ticker
+#     FROM silver.unified_prices p
+#     LEFT JOIN (SELECT ticker, MAX(date) AS max_date
+#                FROM silver.technical_indicators GROUP BY ticker) t
+#       ON p.ticker = t.ticker
+#     WHERE p.date > COALESCE(t.max_date, '1900-01-01')
+#       AND p.date >= CURRENT_DATE - INTERVAL '60 days'
+#   ), base AS (
+#     SELECT … FROM silver.unified_prices p JOIN tickers_to_update t USING (ticker)
+#   ) …
+#
+# Current SQL recomputes the last 30 days for every ticker every run; the
+# incremental version only touches tickers where unified_prices has newer
+# data than technical_indicators. Cheap optimisation for a large universe.
+
 SQL = """
 WITH price_returns AS (
-  SELECT 
+  SELECT
     ticker, date, close, volume,
     LN(close / NULLIF(LAG(close) OVER (PARTITION BY ticker ORDER BY date), 0)) AS log_return
   FROM silver.unified_prices

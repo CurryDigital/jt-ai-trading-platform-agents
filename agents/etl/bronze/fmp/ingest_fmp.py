@@ -355,12 +355,32 @@ def ingest_institutional_holdings(tickers: list = None, max_tickers: int = None)
     print(f"✅ bronze.fmp_institutional_holdings — {inserted} rows upserted{limit_note}")
 
 
+
+
+def _mark_freshness(error=None):
+    """Update gold.source_freshness for the operator dashboard. Soft-fails."""
+    try:
+        from db import get_connection
+        from freshness import mark_source_refreshed
+        conn = get_connection()
+        try:
+            mark_source_refreshed(conn, source='fmp', error=error)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  (freshness write skipped: {e})")
+
 if __name__ == "__main__":
-    # SKIPPED — tables dropped during DB cleanup (API 403 on most endpoints)
-    # ingest_prices()
-    # ingest_quotes()
-    # ingest_earnings()
-    # ingest_earnings_surprises()
-    # ingest_analyst_ratings()
-    # Only institutional holdings still active
-    ingest_institutional_holdings()
+    try:
+        # SKIPPED — tables dropped during DB cleanup (API 403 on most endpoints)
+        # ingest_prices()
+        # ingest_quotes()
+        # ingest_earnings()
+        # ingest_earnings_surprises()
+        # ingest_analyst_ratings()
+        # Only institutional holdings still active
+        ingest_institutional_holdings()
+        _mark_freshness()
+    except Exception as e:
+        _mark_freshness(error=str(e))
+        raise

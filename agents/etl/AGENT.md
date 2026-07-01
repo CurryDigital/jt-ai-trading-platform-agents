@@ -90,7 +90,7 @@ conn = get_connection()
 | Layer       | Convention              | Example                          |
 |-------------|-------------------------|----------------------------------|
 | bronze      | `{source}_{data_type}.py` | `fmp_prices.py`, `yfinance_ohlcv.py` |
-| silver      | `clean_{data_type}.py`  | `clean_prices.py`                |
+| silver      | `clean_unified_{data_type}.py` | `clean_unified_prices.py`, `clean_unified_earnings.py` |
 | gold        | `build_{asset_type}.py` | `build_equity_kpis.py`           |
 | consumption | `{tab}_{data_name}.py`  | `market_stocks_overview.py`      |
 

@@ -284,5 +284,25 @@ def ingest_cot():
     print(f"✅ silver.cot_euro_fx_daily — {inserted} rows upserted")
 
 
+
+
+def _mark_freshness(error=None):
+    """Update gold.source_freshness for the operator dashboard. Soft-fails."""
+    try:
+        from db import get_connection
+        from freshness import mark_source_refreshed
+        conn = get_connection()
+        try:
+            mark_source_refreshed(conn, source='cftc', error=error)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  (freshness write skipped: {e})")
+
 if __name__ == "__main__":
-    ingest_cot()
+    try:
+        ingest_cot()
+        _mark_freshness()
+    except Exception as e:
+        _mark_freshness(error=str(e))
+        raise
