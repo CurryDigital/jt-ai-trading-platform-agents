@@ -85,7 +85,7 @@ run_bronze() {
     local script="$2"
     shift 2
     echo "→ ${name}..."
-    if timeout ${BRONZE_TIMEOUT}s "${PYTHON}" "${script}" "$@"; then
+    if timeout -k 10s ${BRONZE_TIMEOUT}s "${PYTHON}" "${script}" "$@"; then
         echo "  ✅ ${name} complete"
         OK_BRONZE+=("${name}")
     else
@@ -103,7 +103,7 @@ run_silver() {
     local name="$1"
     local script="$2"
     echo "→ ${name}..."
-    if timeout ${SILVER_TIMEOUT}s "${PYTHON}" "${script}"; then
+    if timeout -k 10s ${SILVER_TIMEOUT}s "${PYTHON}" "${script}"; then
         echo "  ✅ ${name} complete"
         OK_SILVER+=("${name}")
     else
@@ -121,7 +121,7 @@ run_gold() {
     local name="$1"
     local script="$2"
     echo "→ ${name}..."
-    if timeout ${GOLD_TIMEOUT}s "${PYTHON}" "${script}"; then
+    if timeout -k 10s ${GOLD_TIMEOUT}s "${PYTHON}" "${script}"; then
         echo "  ✅ ${name} complete"
         OK_GOLD+=("${name}")
     else
@@ -139,7 +139,7 @@ run_consumption() {
     local name="$1"
     local script="$2"
     echo "→ ${name}..."
-    if timeout ${CONSUMPTION_TIMEOUT}s "${PYTHON}" "${script}"; then
+    if timeout -k 10s ${CONSUMPTION_TIMEOUT}s "${PYTHON}" "${script}"; then
         echo "  ✅ ${name} complete"
         OK_CONSUMPTION+=("${name}")
     else
@@ -193,8 +193,18 @@ for f in bronze/hkex/*.py; do
 done
 
 # Yahoo Finance (equities only — NO CRYPTO)
+# 2026-07-01: skip any script tagged '# CADENCE: weekly' — those are
+# long-running jobs (10-15+ min) that don't fit the 120s daily bronze
+# timeout by design. They run via weekly_refresh.sh instead. Without this
+# check, ingest_yfinance_aux.py (earnings + institutional holdings, full
+# ticker universe) got swept into the daily loop and blew past every
+# reasonable time budget for a "daily" run.
 for f in bronze/yfinance/*.py; do
     if [ -f "$f" ]; then
+        if grep -q '# CADENCE: weekly' "$f" 2>/dev/null; then
+            echo "→ skipping $(basename "$f" .py) (tagged weekly-cadence — see weekly_refresh.sh)"
+            continue
+        fi
         run_bronze "YF:$(basename "$f" .py)" "$f"
     fi
 done

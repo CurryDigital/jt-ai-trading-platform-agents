@@ -4,13 +4,24 @@
 # Date flagged: 2026-06-13
 # Action: Split into separate scripts or move gold writes to a dedicated Pipeline B script
 
+# CADENCE: weekly
 #!/usr/bin/env python3
 """
 Bronze Ingestion: Yahoo Finance — Auxiliary Data (Weekly Run)
 ===============================================================
 Fetches earnings calendar + institutional holdings.
-NOT part of the daily regime pipeline — run separately via cron weekly.
-Expected runtime: ~10-15 minutes
+NOT part of the daily regime pipeline — run via weekly_refresh.sh only.
+Expected runtime: ~10-15 minutes (full active-ticker universe).
+
+2026-07-01: daily_refresh.sh's bronze/yfinance/*.py glob was sweeping this
+file into the 120s-per-script daily timeout, which is not enough time to
+process the full ticker universe — the job would get killed mid-run every
+day, producing incomplete, nondeterministic coverage (whichever tickers
+happened to finish first in the ThreadPoolExecutor). The '# CADENCE: weekly'
+marker (anywhere in the file — daily_refresh.sh does a plain grep, not a
+line-1 check) is what excludes this file from the daily glob; weekly_refresh.sh
+greps for the same marker to include it. Keep this marker if you copy this
+file as a template for another weekly-cadence source.
 
 Uses ThreadPoolExecutor for parallel yf.Ticker() calls.
 Tables:
@@ -24,6 +35,7 @@ SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..', 'shared', 'script
 sys.path.insert(0, SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
+from freshness import mark_source_refreshed
 from datetime import date
 
 try:
@@ -202,6 +214,31 @@ def ingest_institutional_holdings(tickers: list = None):
     print(f"✅ bronze.institutional_holdings — {inserted} rows upserted")
 
 
+def _mark_freshness(error=None):
+    """Update gold.source_freshness for the operator dashboard. Soft-fails.
+    Weekly cadence + generous staleness threshold (192h = 8 days grace)."""
+    try:
+        conn = get_connection()
+        try:
+            mark_source_refreshed(
+                conn,
+                source='yfinance_aux',
+                asset_class='equity',
+                expected_frequency='weekly',
+                expected_max_staleness_hours=192,
+                error=error,
+            )
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  (freshness write skipped: {e})")
+
+
 if __name__ == "__main__":
-    ingest_earnings_calendar()
-    ingest_institutional_holdings()
+    try:
+        ingest_earnings_calendar()
+        ingest_institutional_holdings()
+        _mark_freshness()
+    except Exception as e:
+        _mark_freshness(error=str(e))
+        raise
