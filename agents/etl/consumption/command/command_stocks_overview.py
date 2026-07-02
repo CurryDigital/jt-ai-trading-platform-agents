@@ -2,11 +2,17 @@
 """
 Consumption: Command Tab — Stocks Overview & Top Opportunities
 Reads from: gold.kpis_metrics, gold.asset_registry, gold.strategy_ticker_scores,
-            gold.strategy_registry (opportunities ranking — sharpe_oos, name),
-            gold.strategy_definitions (summary card count only — status column)
+            gold.strategy_registry (opportunities ranking + live-strategy count —
+            sharpe_oos, name, status)
 Writes to:  consumption.markets_stocks_overview,
             consumption.dashboard_opportunities_top,
             consumption.dashboard_summary_cards
+
+2026-07-01: no longer reads gold.strategy_definitions at all — its status
+vocabulary (approved/rejected/retired/backtesting) is an approval-workflow
+state, not an execution state, so it couldn't correctly answer either
+"expected_return_pct" (no sharpe_ratio column) or "is this strategy live"
+(no 'live' value in its domain). gold.strategy_registry answers both.
 """
 import sys, os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -122,6 +128,14 @@ ORDER BY sts.score DESC
 LIMIT 10;
 """
 
+# 2026-07-01: 'strategies_live' was filtering gold.strategy_definitions
+# WHERE status = 'ACTIVE'. Verified live data: that table's real status
+# values are {approved, rejected, retired, backtesting} (all lowercase,
+# none 'active'/'ACTIVE') — an APPROVAL-WORKFLOW vocabulary, not an
+# execution-state one, so it can never represent "live" no matter what
+# case is used. gold.strategy_registry.status is the right column: it
+# has an actual CHECK constraint enumerating {'paper','live','paused',
+# 'retired'} — 'live' is a first-class, enforced value there.
 SQL_SUMMARY = """
 INSERT INTO consumption.dashboard_summary_cards
   (card_key, card_title, value_display, value_numeric, change_pct, trend, last_updated)
@@ -131,8 +145,8 @@ VALUES
    (SELECT COUNT(*) FROM gold.strategy_ticker_scores WHERE signal_action = 'BUY'),
    NULL, 'up', NOW()),
   ('strategies_live', 'Live Strategies',
-   (SELECT COUNT(*)::text FROM gold.strategy_definitions WHERE status = 'ACTIVE'),
-   (SELECT COUNT(*) FROM gold.strategy_definitions WHERE status = 'ACTIVE'),
+   (SELECT COUNT(*)::text FROM gold.strategy_registry WHERE status = 'live'),
+   (SELECT COUNT(*) FROM gold.strategy_registry WHERE status = 'live'),
    NULL, 'up', NOW())
 ON CONFLICT (card_key) DO UPDATE SET
   value_display = EXCLUDED.value_display,
