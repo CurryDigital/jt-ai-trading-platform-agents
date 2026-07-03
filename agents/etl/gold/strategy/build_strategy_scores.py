@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 """
 Gold Strategy: Strategy Scores & Backtest Results
-Reads from: gold.kpis_metrics, gold.strategy_universes, gold.strategy_signal_criteria
+Reads from: gold.kpis_metrics, gold.strategy_registry (universe_tickers),
+            gold.strategy_signal_criteria
 Writes to:  gold.strategy_ticker_scores, gold.strategy_registry
+
+2026-07-03: assignments now unnest gold.strategy_registry.universe_tickers
+instead of reading gold.strategy_universes. strategy_universes is a
+separate, empty table nothing in this codebase ever writes to; the same
+ticker-universe data already lives on strategy_registry (populated at
+strategy-onboarding time), so this was silently starving the whole scoring
+pipeline (0 assignments -> 0 scores -> 0 dashboard opportunities), not a
+missing-data problem.
 """
 import sys, os, json
 sys.path.insert(0, 'shared/scripts')
@@ -26,7 +35,9 @@ WITH criteria AS (
   FROM gold.strategy_signal_criteria sc
 ),
 assignments AS (
-  SELECT strategy_id, ticker FROM gold.strategy_universes WHERE is_active = TRUE
+  SELECT strategy_id, UNNEST(universe_tickers) AS ticker
+  FROM gold.strategy_registry
+  WHERE retired_at IS NULL
 ),
 latest_kpis AS (
   SELECT DISTINCT ON (ticker) *
@@ -75,6 +86,13 @@ ON CONFLICT (strategy_id, ticker) DO UPDATE SET
   updated_at     = NOW();
 """
 
+# NOT FIXED — flagged, not guessed: gold.strategy_backtests.strategy_id is
+# smallint (the agents/signals/ registry.json numeric id space, 1-20),
+# while gold.strategy_registry.strategy_id is varchar (semantic ids like
+# "btc_funding_mean_rev_short"). ::varchar cast never bridges these two id
+# spaces, so this UPDATE matches 0 rows against real data today. Needs an
+# operator decision on which id space gold.strategy_backtests should key
+# on before this can be fixed — not something to guess-map silently.
 SQL_REGISTRY_SYNC = """
 UPDATE gold.strategy_registry sr
 SET
