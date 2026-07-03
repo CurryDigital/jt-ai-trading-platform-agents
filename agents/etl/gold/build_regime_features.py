@@ -8,7 +8,13 @@ One row per trading date. Direct input to HMM in Goal 3.
 Export: compute_features(conn) -> pd.DataFrame
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+
+# CWD-independent: this file previously relied on being invoked with
+# cwd=agents/etl/ (true only via gold_builder.py's dynamic loader), which
+# made it crash with ModuleNotFoundError when run standalone.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ETL_SHARED = os.path.normpath(os.path.join(_HERE, '..', 'shared', 'scripts'))
+if _ETL_SHARED not in sys.path: sys.path.insert(0, _ETL_SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 from datetime import date
