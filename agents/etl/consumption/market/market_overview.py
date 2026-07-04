@@ -160,13 +160,30 @@ ON CONFLICT (ticker) DO UPDATE SET
 
 # ── Dashboard Market Overview ─────────────────────────────────────────────────
 
+# 2026-07-04: region is now looked up from FRONTEND_INDEX_REGIONS instead of
+# passed through from gold.index_metrics.region ('Americas'/'Europe'/'Asia'/
+# 'Unknown', set by silver/sync_market_indices.py -- a different taxonomy for
+# a different purpose, not the {US,HK} vocabulary consumption.dashboard_indices
+# filters on). A prior one-off UPDATE hand-patched 5 existing rows'
+# region to 'US'/'HK' directly in the DB without fixing this query; since
+# ON CONFLICT is keyed on (region, index_ticker), the next run of this
+# unpatched query would have re-inserted those same tickers with
+# region='Americas'/'Asia' as NEW rows (no conflict match), permanently
+# freezing the patched rows as stale while a duplicate, invisible-to-the-view
+# row kept accumulating live data. The join below is the single source of
+# truth for which tickers are in scope and what region they map to, so the
+# same 5 rows get updated in place on every run and the view never mismatches.
+#
+# spark is populated here too (previously only ever set by that same one-off
+# UPDATE, so it would never refresh again either) from this table's own
+# price history, consistent with current_value's source.
 DASHBOARD_OVERVIEW_SQL = """
 INSERT INTO consumption.dashboard_market_overview
     (region, index_name, index_ticker,
      current_value, change_pct, change_value, trend,
-     sentiment_score, volatility_index, updated_at)
+     sentiment_score, volatility_index, spark, updated_at)
 SELECT
-    im.region,
+    r.region,
     im.name   AS index_name,
     im.ticker AS index_ticker,
     im.close  AS current_value,
@@ -179,17 +196,32 @@ SELECT
     END AS trend,
     NULL::numeric AS sentiment_score,
     NULL::numeric AS volatility_index,
+    spark.values AS spark,
     NOW()
 FROM (
     SELECT DISTINCT ON (ticker) *
     FROM gold.index_metrics
     ORDER BY ticker, date DESC
 ) im
+JOIN (VALUES
+    ('^GSPC', 'US'), ('^IXIC', 'US'), ('^DJI', 'US'), ('^RUT', 'US'),
+    ('^HSI', 'HK')
+) AS r(ticker, region) ON r.ticker = im.ticker
+LEFT JOIN LATERAL (
+    SELECT ARRAY_AGG(h.close ORDER BY h.date ASC) AS values
+    FROM (
+        SELECT close, date FROM gold.index_metrics
+        WHERE ticker = im.ticker
+        ORDER BY date DESC
+        LIMIT 12
+    ) h
+) spark ON TRUE
 WHERE im.is_volatility_index = FALSE
 ON CONFLICT (region, index_ticker) DO UPDATE SET
     current_value  = EXCLUDED.current_value,
     change_pct     = EXCLUDED.change_pct,
     trend          = EXCLUDED.trend,
+    spark          = EXCLUDED.spark,
     updated_at     = NOW();
 """
 
