@@ -81,7 +81,11 @@ def get_commodity_tickers(conn) -> list:
     return [r[0] for r in cur.fetchall()] or list(COMMODITY_META.keys())
 
 def _upsert_prices(cur, ticker, df):
-    """Upsert a single ticker's price DataFrame. Returns inserted count."""
+    """Upsert a single ticker's price DataFrame. Returns inserted count.
+
+    2026-07-03: ON CONFLICT now COALESCEs every column instead of only
+    refreshing close/volume/adjusted_close -- see ingest_yfinance.py for the
+    full explanation (same bug, same fix, both scripts write this table)."""
     inserted = 0
     for _, row in df.iterrows():
         try:
@@ -91,9 +95,12 @@ def _upsert_prices(cur, ticker, df):
                      adjusted_close, ingested_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (ticker, date) DO UPDATE SET
-                    close = EXCLUDED.close,
-                    volume = EXCLUDED.volume,
-                    adjusted_close = EXCLUDED.adjusted_close
+                    open = COALESCE(EXCLUDED.open, bronze.yf_prices.open),
+                    high = COALESCE(EXCLUDED.high, bronze.yf_prices.high),
+                    low = COALESCE(EXCLUDED.low, bronze.yf_prices.low),
+                    close = COALESCE(EXCLUDED.close, bronze.yf_prices.close),
+                    volume = COALESCE(EXCLUDED.volume, bronze.yf_prices.volume),
+                    adjusted_close = COALESCE(EXCLUDED.adjusted_close, bronze.yf_prices.adjusted_close)
             """, (
                 ticker,
                 row['Date'].date() if hasattr(row['Date'], 'date') else row['Date'],
@@ -192,8 +199,12 @@ def ingest_commodity_futures(days_back: int = 7, max_tickers: int = 10):
                              open, high, low, close, volume, adjusted_close, ingested_at)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                         ON CONFLICT (ticker, date) DO UPDATE SET
-                            close = EXCLUDED.close,
-                            volume = EXCLUDED.volume
+                            open = COALESCE(EXCLUDED.open, bronze.yf_commodity_futures.open),
+                            high = COALESCE(EXCLUDED.high, bronze.yf_commodity_futures.high),
+                            low = COALESCE(EXCLUDED.low, bronze.yf_commodity_futures.low),
+                            close = COALESCE(EXCLUDED.close, bronze.yf_commodity_futures.close),
+                            volume = COALESCE(EXCLUDED.volume, bronze.yf_commodity_futures.volume),
+                            adjusted_close = COALESCE(EXCLUDED.adjusted_close, bronze.yf_commodity_futures.adjusted_close)
                     """, (
                         ticker, meta[0], meta[1], meta[2],
                         ts.date(),
