@@ -265,7 +265,7 @@ INSERT INTO gold.ib_gateway_heartbeat (id, connected) VALUES (1, FALSE)
 
 -- Risk limits: per-strategy + a singleton global row (strategy_id IS NULL)
 CREATE TABLE IF NOT EXISTS gold.risk_limits_facts (
-    strategy_id      VARCHAR(10),                              -- NULL = global row
+    strategy_id      VARCHAR(50),                              -- NULL = global row
     halt_phrase_set  BOOLEAN NOT NULL DEFAULT FALSE,
     global_halt      BOOLEAN NOT NULL DEFAULT FALSE,
     capital_cap_pct  NUMERIC,

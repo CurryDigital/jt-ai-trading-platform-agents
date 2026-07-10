@@ -86,6 +86,22 @@ cd "${SIGNALS_DIR}"
 "${PYTHON}" strategies/run_signals.py
 RC=$?
 
+# ── Redesign signal-consumption tables (bridge legacy signal tables → v2 views) ──
+# Populates gold.signal_evaluations, gold.signal_family_performance,
+# gold.signal_proximity_facts. Must run AFTER run_signals.py because it reads
+# gold.strategy_ticker_scores.
+if [ ${RC} -eq 0 ]; then
+    echo "→ Building redesign signal tables..."
+    if "${PYTHON}" strategies/build_signal_redesign.py; then
+        echo "  ✅ redesign signal tables complete"
+    else
+        echo "  ⚠️ redesign signal tables failed"
+        # Don't fail the whole cycle; legacy signal logs are already written.
+    fi
+else
+    echo "  ⚠️ run_signals.py failed — skipping redesign signal tables"
+fi
+
 echo "=========================================="
 echo "SIGNAL CYCLE COMPLETED: $(date)"
 echo "run_signals.py exit code: ${RC}"

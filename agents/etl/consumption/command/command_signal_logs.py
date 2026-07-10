@@ -14,7 +14,7 @@ INSERT INTO consumption.signal_logs
   (strategy_id, ticker, signal_type, signal_criteria, confidence,
    signal, logged_at)
 SELECT
-  sts.strategy_id::smallint,
+  sts.strategy_id::text,
   sts.ticker,
   sts.signal_action,
   sts.criteria_met::text,

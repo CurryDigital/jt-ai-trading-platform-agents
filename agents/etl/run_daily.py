@@ -39,6 +39,10 @@ GOLD = [
     ('gold_builder', 'gold/gold_builder.py'),
 ]
 
+CONSUMPTION = [
+    ('pipeline_feed', 'consumption/pipeline/build_pipeline_feed.py'),
+]
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
@@ -130,6 +134,40 @@ def get_today_regime() -> dict:
                 'active_strategies': [], 'override_used': False, 'confidence': 0.0}
 
 
+def get_pipeline_summary() -> dict:
+    """Fetch pipeline summary for run log / report from database.
+
+    Mirrors the consumption script output so reports stay consistent."""
+    sys.path.insert(0, SHARED)
+    from db import get_connection
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                COUNT(*) FILTER (WHERE stage = 'experimental') AS experimental,
+                COUNT(*) FILTER (WHERE stage = 'near_golden')  AS near_golden,
+                COUNT(*) FILTER (WHERE stage = 'golden')       AS golden,
+                COUNT(*) FILTER (WHERE stage = 'deployed')    AS deployed,
+                COUNT(*) AS total
+            FROM gold.v_pipeline_ui_feed
+        """)
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row:
+            return {
+                'experimental': row[0] or 0,
+                'near_golden': row[1] or 0,
+                'golden': row[2] or 0,
+                'deployed': row[3] or 0,
+                'total': row[4] or 0,
+            }
+    except Exception as e:
+        return {'error': str(e)}
+    return {'error': 'no data'}
+
+
 def main():
     today = datetime.now(timezone.utc).strftime('%Y%m%d')
     log_path = os.path.join(LOG_DIR, f'run_{today}.log')
@@ -161,6 +199,13 @@ def main():
             _log(f"\nWARNING: Stage 3 GOLD failed. Yesterday's regime_label is still valid.", log_file)
             # Do NOT abort — yesterday's labels are still usable
 
+    # Stage 3.5 — CONSUMPTION (UI feeds)
+    stage35 = None
+    if exit_code == 0:
+        stage35 = run_stage('CONSUMPTION', CONSUMPTION, log_file, retries=1)
+        if stage35['status'] != 'OK':
+            _log(f"\nWARNING: Stage 3.5 CONSUMPTION failed. UI feeds may be stale.", log_file)
+
     # Stage 4 — REPORT
     _log(f"\n{'='*50}", log_file)
     _log(f"Stage — REPORT", log_file)
@@ -175,6 +220,15 @@ def main():
     except Exception as e:
         _log(f"  WARNING: Could not fetch today's regime: {e}", log_file)
 
+    try:
+        psum = get_pipeline_summary()
+        if 'error' in psum:
+            _log(f"  WARNING: Pipeline summary: {psum['error']}", log_file)
+        else:
+            _log(f"  Pipeline summary:    experimental={psum['experimental']}, near_golden={psum['near_golden']}, golden={psum['golden']}, deployed={psum['deployed']}, total={psum['total']}", log_file)
+    except Exception as e:
+        _log(f"  WARNING: Could not fetch pipeline summary: {e}", log_file)
+
     total_dur = time.time() - total_t0
 
     # Summary
@@ -185,6 +239,10 @@ def main():
         _log(f"Stage 3 GOLD         {'✓' if stage3['status']=='OK' else '✗'} {stage3['duration']:.1f}s", log_file)
     else:
         _log(f"Stage 3 GOLD         — skipped (earlier stage failed)", log_file)
+    if stage35:
+        _log(f"Stage 3.5 CONSUMPTION {'✓' if stage35['status']=='OK' else '✗'} {stage35['duration']:.1f}s", log_file)
+    else:
+        _log(f"Stage 3.5 CONSUMPTION — skipped (earlier stage failed)", log_file)
     _log(f"Stage 4 REPORT       ✓", log_file)
     _log(f"{'─'*50}", log_file)
     _log(f"Total runtime:       {total_dur:.1f}s", log_file)

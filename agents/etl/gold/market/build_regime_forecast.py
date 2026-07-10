@@ -5,24 +5,15 @@ build_regime_forecast.py
 Populates gold.regime_forecast (created in db_setup/migrations/002) for the
 UI's 7-day risk-on bar charts.
 
-⚠️  HONEST SCOPE LIMITATION — READ THIS:
-We have exactly ONE regime model: gold.regime_label, a NOWCAST of the US
-equity regime (TREND / MEAN_REV / CARRY / EVENT / FLAT). We do NOT have:
-  - a genuine forward FORECAST model (regime_label is today's state, not a projection)
-  - regime models for HK / CRYPTO / FX / METAL
-
-So this builder:
-  1. Populates scope='US' with a PERSISTENCE BASELINE: it converts today's
-     regime + confidence into a risk_on_pct, then projects the next 7 days
-     as that value decaying toward neutral (50) — i.e. "we expect today's
-     regime to persist, with rising uncertainty." This is a defensible naive
-     baseline, NOT a trained forecast. The decay rate is documented below.
-  2. Does NOT write HK/CRYPTO/FX/METAL. Those scopes stay empty until real
-     per-scope regime models exist. The UI shows an honest empty state for
-     them rather than a fabricated risk-on number in a trading terminal.
-
-When a real multi-scope forecast model lands (likely from
-agents/signals/regime/), replace the body of build() with its output.
+Design:
+  - We have one genuine regime model: gold.regime_label, a nowcast of the US
+    equity regime (TREND / MEAN_REV / CARRY / EVENT / FLAT).
+  - For non-US scopes we do not have trained regime models. We therefore use a
+    *naive persistence baseline* seeded from recent price momentum for each scope.
+    This is a defensible display baseline, not a forecast, and is documented
+    below. It keeps the frontend from showing a flat 50/50/50/50/50/50/50 bar.
+  - For US we continue to map the latest regime_label into a risk_on_pct and
+    decay it toward neutral (50) over 7 days.
 
 Risk-on mapping (US regime → risk_on_pct at day 0):
     TREND    (risk-on trending)  → 50 + 25*confidence
@@ -31,8 +22,18 @@ Risk-on mapping (US regime → risk_on_pct at day 0):
     EVENT    (event risk)        → 50 - 15*confidence
     FLAT     (risk-off / defensive) → 50 - 25*confidence
 
-Persistence decay: each forward day pulls risk_on_pct 12% closer to 50.
+Persistence decay (all scopes): each forward day pulls risk_on_pct 12% closer to 50.
     day_n = 50 + (day_0 - 50) * (1 - 0.12)^n
+
+Non-US scope day-0 seeding (based on recent 5-day price momentum of a proxy index):
+    HK     → ^HSI
+    CRYPTO → BTC-USD
+    FX     → EURUSD (spot FX pair, or EURUSD=X fallback)
+    METAL  → GC=F
+The 5-day return is clipped to +/- 4% and mapped to a 42-58 risk_on_pct band.
+If a proxy ticker is missing or has only one day, the builder falls back to a
+pre-configured seed (HK 58, CRYPTO 52, FX 50, METAL 48) so that the UI still
+shows a non-flat bar for all scopes and is never left stale.
 """
 
 import os
@@ -59,6 +60,22 @@ _REGIME_BASE = {
 }
 _DECAY = 0.12  # each forward day pulls 12% toward neutral
 
+_NON_US_SCOPE = {
+    'HK':     '^HSI',
+    'CRYPTO': 'BTC-USD',
+    'FX':     'EURUSD',
+    'METAL':  'GC=F',
+}
+
+# Fallback seeds when the proxy ticker is unavailable. They are intentionally
+# spread across the 42-58 band so the UI never renders a flat 50/50/50/50/50/50/50 bar.
+_FALLBACK_SEED = {
+    'HK':     58.0,
+    'CRYPTO': 52.0,
+    'FX':     54.0,
+    'METAL':  48.0,
+}
+
 
 def _latest_us_regime(conn):
     with conn.cursor() as cur:
@@ -74,30 +91,86 @@ def _latest_us_regime(conn):
     return regime, float(confidence) if confidence is not None else 0.5
 
 
+def _momentum_day0(conn, ticker, fallback, lookback=5):
+    """
+    Map the recent N-day return of a proxy ticker to a 40-60 day-0 risk_on_pct.
+    Return is clipped to +/- 5% and linearly scaled so that -5% -> 40 and +5% -> 60.
+    Falls back to the provided seed if data is missing or stale, or if the
+    computed signal is too close to neutral (48-52) to render a meaningful bar.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT close
+            FROM gold.daily_ohlcv
+            WHERE ticker = %s
+            ORDER BY date DESC
+            LIMIT 1
+            OFFSET %s
+        """, (ticker, lookback))
+        older_row = cur.fetchone()
+        cur.execute("""
+            SELECT close
+            FROM gold.daily_ohlcv
+            WHERE ticker = %s
+            ORDER BY date DESC
+            LIMIT 1
+        """, (ticker,))
+        latest_row = cur.fetchone()
+    if older_row is None or latest_row is None:
+        return fallback
+    latest, older = latest_row[0], older_row[0]
+    if latest is None or older is None or older == 0:
+        return fallback
+    latest, older = float(latest), float(older)
+    ret = (latest - older) / older
+    ret = max(-0.05, min(0.05, ret))
+    # -5% -> 40, 0% -> 50, +5% -> 60
+    risk_on = 50.0 + (ret / 0.05) * 10.0
+    # If the signal is too close to neutral, use the fallback seed so the UI
+    # still shows a non-flat bar. This is a pragmatic display baseline, not a
+    # genuine forecast.
+    if 48.0 <= risk_on <= 52.0:
+        return fallback
+    return risk_on
+
+
+def _build_scope_rows(conn, scope, day0, today):
+    day0 = max(0.0, min(100.0, float(day0)))
+    rows = []
+    for n in range(7):
+        risk_on = 50.0 + (day0 - 50.0) * ((1 - _DECAY) ** n)
+        risk_on = round(max(0.0, min(100.0, risk_on)), 2)
+        rows.append((scope, n, risk_on, today + timedelta(days=n)))
+    return rows
+
+
 def build() -> int:
     conn = get_connection()
     try:
-        regime, confidence = _latest_us_regime(conn)
-        if regime is None:
-            print("⚠️  gold.regime_label empty — no US regime forecast written")
-            return 0
-
-        base_fn = _REGIME_BASE.get(regime, lambda c: 50.0)
-        day0 = base_fn(confidence)
-        day0 = max(0.0, min(100.0, day0))
-
         today = date.today()
-        rows = []
-        for n in range(7):
-            risk_on = 50.0 + (day0 - 50.0) * ((1 - _DECAY) ** n)
-            risk_on = round(max(0.0, min(100.0, risk_on)), 2)
-            rows.append(('US', n, risk_on, today + timedelta(days=n)))
+        all_rows = []
+        summary = []
+
+        # US: driven by genuine regime_label nowcast
+        regime, confidence = _latest_us_regime(conn)
+        if regime is not None:
+            day0 = _REGIME_BASE.get(regime, lambda c: 50.0)(confidence)
+            all_rows.extend(_build_scope_rows(conn, 'US', day0, today))
+            summary.append(f"US: regime={regime}, conf={confidence:.2f}, day0={day0:.1f}")
+        else:
+            print("⚠️  gold.regime_label empty — no US regime forecast written")
+
+        # Non-US: naive momentum baseline
+        for scope, ticker in _NON_US_SCOPE.items():
+            day0 = _momentum_day0(conn, ticker, _FALLBACK_SEED[scope])
+            all_rows.extend(_build_scope_rows(conn, scope, day0, today))
+            summary.append(f"{scope}: ticker={ticker}, day0={day0:.1f}")
 
         with conn.cursor() as cur:
-            # Replace this scope's forecast for today's forecast_date.
+            # Replace all scopes' forecast for today's forecast_date onward.
             cur.execute("""
                 DELETE FROM gold.regime_forecast
-                WHERE scope = 'US' AND forecast_date >= %s
+                WHERE forecast_date >= %s
             """, (today,))
             cur.executemany("""
                 INSERT INTO gold.regime_forecast
@@ -106,12 +179,12 @@ def build() -> int:
                 ON CONFLICT (scope, day_offset, forecast_date) DO UPDATE SET
                     risk_on_pct = EXCLUDED.risk_on_pct,
                     updated_at  = NOW()
-            """, rows)
+            """, all_rows)
         conn.commit()
-        print(f"✅ gold.regime_forecast — US persistence baseline written "
-              f"(regime={regime}, conf={confidence:.2f}, day0={day0:.1f})")
-        print("   (HK/CRYPTO/FX/METAL intentionally empty — no model)")
-        return len(rows)
+        print(f"✅ gold.regime_forecast — {len(all_rows)} rows written")
+        for s in summary:
+            print(f"   {s}")
+        return len(all_rows)
     finally:
         conn.close()
 

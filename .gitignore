@@ -34,6 +34,15 @@ node_modules/
 .env.local
 .env.*.local
 
+# Ignore generated data artifacts (ETL pipeline output)
+*.parquet
+*.pkl
+*.csv
+agents/etl/gold/crypto/
+agents/etl/silver/crypto/
+agents/signals/data/
+agents/signals/regime/*.pkl
+
 # Ignore logs
 *.log
 logs/

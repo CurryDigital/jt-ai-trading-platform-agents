@@ -46,7 +46,13 @@ def _load_env_and_imports():
         raise ModuleNotFoundError(f"{e}.{_missing_deps_help()}") from e
 
     env_path = os.path.expanduser('~/.hermes/profiles/qr_etl/env/etl.env')
-    load_dotenv(env_path, override=True)
+    if os.path.exists(env_path):
+        load_dotenv(env_path, override=True)
+    else:
+        # Fallback to parent env in legacy deployments
+        alt_path = os.path.expanduser('~/.hermes/profiles/qr_etl/.env')
+        if os.path.exists(alt_path):
+            load_dotenv(alt_path, override=True)
     return psycopg2, pool
 
 

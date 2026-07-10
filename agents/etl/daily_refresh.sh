@@ -288,12 +288,38 @@ for asset in equity fx commodity market portfolio ipo strategy; do
     fi
 done
 
+# Redesign data-related builders (explicit so pipeline ownership is obvious):
+#   market band, macro, execution/gateway, risk limits
+run_gold "Market overview" "consumption/market/market_overview.py"
+run_gold "Market breadth" "gold/market/build_market_breadth.py"
+run_gold "Market movers" "gold/market/build_market_movers.py"
+run_gold "Market sentiment" "gold/market/build_market_sentiment.py"
+run_gold "Macro KPIs" "gold/market/build_macro_kpis.py"
+run_gold "Macro sectors" "gold/market/build_macro_sectors.py"
+run_gold "Macro regime forecast" "gold/market/build_regime_forecast.py"
+run_gold "Economic calendar" "gold/market/build_economic_calendar.py"
+run_gold "Market news" "gold/market/build_market_news.py"
+run_gold "IB gateway state" "gold/market/build_ib_gateway_state.py"
+run_gold "Risk limits" "gold/market/build_risk_limits.py"
+run_gold "Attention items" "gold/strategy/build_attention_items.py"
+run_gold "Account NAV daily" "gold/portfolio/build_account_nav_daily.py"
+run_gold "Manual positions fold-in" "gold/portfolio/build_manual_positions.py"
+
 # IBKR gold promotion (from silver data)
 run_gold "IBKR promote" "gold/promote_ibkr.py"
 run_gold "IBKR orders promote" "gold/promote_ibkr_orders.py"
 
 # S9 MACD signal generation
 run_gold "S9 MACD signals" "gold/strategy/s9_macd_daily.py"
+
+# Research-approved live signals (paper trading)
+run_gold "Small-Cap Credit Spread signal" "gold/strategy/ingest_small_cap_credit_spread.py"
+
+# ETF paper-trading signals and runners
+run_gold "ETF Multi-Asset signal" "build_etf_multi_asset_paper_signal.sql"
+run_gold "ETF Covered-Call signal" "build_etf_covered_call_paper_signal.sql"
+run_gold "ETF Multi-Asset paper runner" "paper_run_etf_multi_asset.py"
+run_gold "ETF Covered-Call paper runner" "paper_run_etf_covered_call.py"
 
 if [ ${#FAILED_GOLD[@]} -gt 0 ]; then
     echo "⚠️ Gold failures: ${FAILED_GOLD[*]}"

@@ -4,8 +4,9 @@ build_market_movers.py
 ======================
 Populates gold.market_movers_facts (created in db_setup/migrations/002).
 
-Top 10 gainers + top 10 losers per region (US, HK), ranked by returns_1d on
-the latest trading date. Computed from gold.daily_ohlcv + gold.asset_registry.
+Top 10 gainers + top 10 losers per region (US, HK), ranked by change_pct on
+snapshot date. Computed from consumption.markets_stocks_overview and filtered
+by liquidity so thin names and futures don't surface in the Command Center.
 
 Output schema (one row per region × direction × rank, max 40 rows):
     region, direction ∈ {gainer,loser}, ticker, change_pct, rank, updated_at
@@ -26,25 +27,30 @@ from db import get_connection
 from freshness import mark_source_refreshed
 
 
+# Liquidity filters: must have meaningful current volume and be trading at
+# least half its average volume (to avoid one-off spikes / stale prints).
+MIN_VOLUME = 100_000
+MIN_VOLUME_RATIO = 0.5
+
 # Two-step: delete then insert. Keeps the operation atomic via the
 # wrapping transaction.
 DELETE_SQL = "DELETE FROM gold.market_movers_facts;"
 
 INSERT_SQL = """
-WITH latest_date AS (
-    SELECT MAX(date) AS d FROM gold.daily_ohlcv
-),
-candidates AS (
+WITH candidates AS (
     SELECT
-        ar.market   AS region,
-        o.ticker,
-        o.returns_1d * 100.0 AS change_pct
-    FROM   gold.daily_ohlcv o
-    JOIN   gold.asset_registry ar ON ar.ticker = o.ticker AND ar.is_active = TRUE
-    WHERE  o.date = (SELECT d FROM latest_date)
-      AND  ar.market IN ('US','HK')
-      AND  ar.asset_class IN ('EQUITY','ETF','STOCK')
-      AND  o.returns_1d IS NOT NULL
+        market     AS region,
+        ticker,
+        change_pct,
+        volume,
+        avg_volume
+    FROM   consumption.markets_stocks_overview
+    WHERE  market IN ('US','HK')
+      AND  asset_class IN ('EQUITY','ETF','STOCK')
+      AND  change_pct IS NOT NULL
+      AND  volume >= {min_volume}
+      AND  (avg_volume IS NULL OR avg_volume = 0 OR volume::numeric / avg_volume >= {min_volume_ratio})
+      AND  ticker NOT LIKE '%=F'          -- exclude futures contracts
 ),
 ranked_gainers AS (
     SELECT
@@ -73,7 +79,22 @@ FROM (
     SELECT * FROM ranked_losers  WHERE rank <= 10
 ) t
 ORDER BY region, direction, rank;
+""".format(min_volume=MIN_VOLUME, min_volume_ratio=MIN_VOLUME_RATIO)
+
+# Expose region and restrict to top-3 per region/direction for the Command Center.
+CREATE_OR_REPLACE_VIEW_SQL = """
+CREATE OR REPLACE VIEW consumption.market_movers AS
+SELECT region,
+       direction,
+       ticker,
+       change_pct,
+       rank,
+       updated_at
+FROM   gold.market_movers_facts
+WHERE  rank <= 3
+ORDER BY region, direction, rank;
 """
+
 
 
 def build() -> int:
@@ -83,6 +104,7 @@ def build() -> int:
             cur.execute(DELETE_SQL)
             cur.execute(INSERT_SQL)
             n = cur.rowcount
+            cur.execute(CREATE_OR_REPLACE_VIEW_SQL)
         conn.commit()
         print(f"✅ gold.market_movers_facts — {n} mover rows inserted")
         return n
