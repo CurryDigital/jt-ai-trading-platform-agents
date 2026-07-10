@@ -80,14 +80,27 @@ def get_commodity_tickers(conn) -> list:
     """)
     return [r[0] for r in cur.fetchall()] or list(COMMODITY_META.keys())
 
+# Module-level row-error tracking (ported from the deleted ingest_yfinance.py
+# 2026-07-10 when the two double-ingesting scripts were consolidated into this
+# one). If the row error rate crosses 5% of attempts, main() exits non-zero so
+# cron + gold.source_freshness see the truth instead of a green checkmark over
+# a mostly-failed ingest.
+_n_row_errors = 0
+_n_rows_attempted = 0
+ROW_ERROR_RATE_THRESHOLD = 0.05
+
+
 def _upsert_prices(cur, ticker, df):
     """Upsert a single ticker's price DataFrame. Returns inserted count.
 
-    2026-07-03: ON CONFLICT now COALESCEs every column instead of only
-    refreshing close/volume/adjusted_close -- see ingest_yfinance.py for the
-    full explanation (same bug, same fix, both scripts write this table)."""
+    2026-07-03: ON CONFLICT COALESCEs every column instead of only refreshing
+    close/volume/adjusted_close. Yahoo often returns a same-day row with Close
+    populated but Open/High/Low still NaN (bar not finalized); the old clause
+    froze open/high/low at NULL forever because it never wrote them again."""
+    global _n_row_errors, _n_rows_attempted
     inserted = 0
     for _, row in df.iterrows():
+        _n_rows_attempted += 1
         try:
             cur.execute("""
                 INSERT INTO bronze.yf_prices
@@ -113,6 +126,7 @@ def _upsert_prices(cur, ticker, df):
             ))
             inserted += 1
         except Exception as e:
+            _n_row_errors += 1
             print(f"    Row error {ticker}: {e}")
     return inserted
 
@@ -226,6 +240,39 @@ def ingest_commodity_futures(days_back: int = 7, max_tickers: int = 10):
     print(f"✅ bronze.yf_commodity_futures — {inserted} rows upserted")
 
 
+def _mark_freshness(error=None):
+    """Update gold.source_freshness for the operator dashboard. Soft-fails."""
+    try:
+        from freshness import mark_source_refreshed
+        conn = get_connection()
+        try:
+            mark_source_refreshed(conn, source='yfinance', error=error)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  (freshness write skipped: {e})")
+
+
+def _check_row_error_rate():
+    """Exit non-zero if too many rows failed — masks would otherwise hide
+    behind individual `Row error {ticker}: ...` prints."""
+    if _n_rows_attempted == 0:
+        return
+    rate = _n_row_errors / _n_rows_attempted
+    print(f"\n  Row stats: {_n_row_errors} errors / {_n_rows_attempted} attempted "
+          f"({rate:.1%})  threshold={ROW_ERROR_RATE_THRESHOLD:.0%}")
+    if rate > ROW_ERROR_RATE_THRESHOLD:
+        print(f"  ⚠️ row error rate exceeds threshold — exiting non-zero")
+        _mark_freshness(error=f"row_error_rate={rate:.2%} ({_n_row_errors}/{_n_rows_attempted})")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    ingest_yf_prices()
-    ingest_commodity_futures()
+    try:
+        ingest_yf_prices()
+        ingest_commodity_futures()
+        _check_row_error_rate()
+        _mark_freshness()
+    except Exception as e:
+        _mark_freshness(error=str(e))
+        raise

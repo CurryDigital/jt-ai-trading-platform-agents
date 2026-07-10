@@ -173,7 +173,7 @@ echo "🔶 BRONZE — Raw Ingestion (by Source System)"
 echo "------------------------------------------"
 
 # Binance (crypto) — daily klines
-run_bronze "Binance crypto" "shared/scripts/ingest_binance_crypto.py" "1d"
+run_bronze "Binance crypto" "bronze/binance/ingest_binance.py" "1d"
 
 # FMP (equities/fundamentals)
 for f in bronze/fmp/*.py; do

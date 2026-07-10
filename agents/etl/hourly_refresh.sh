@@ -106,7 +106,7 @@ echo "🔶 BRONZE — Raw Ingestion (Hourly Sources)"
 echo "------------------------------------------"
 
 # Binance (crypto) — hourly klines
-run_bronze "Binance crypto" "shared/scripts/ingest_binance_crypto.py" "1h"
+run_bronze "Binance crypto" "bronze/binance/ingest_binance.py" "1h"
 
 # IBKR TWS live sync — positions, account summary (lightweight, can run hourly)
 run_bronze "IBKR TWS live" "bronze/ibkr/ingest_ibkr_tws.py"

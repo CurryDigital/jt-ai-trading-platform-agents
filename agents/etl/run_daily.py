@@ -27,7 +27,7 @@ BRONZE = [
     ('binance',        'bronze/binance/ingest_binance.py'),
     ('funding_rates',  'bronze/binance/ingest_funding_rates.py'),
     ('cot_euro_fx',    'bronze/cftc/ingest_cot_euro_fx.py'),
-    ('macro_calendar', 'bronze/macro/ingest_macro_calendar.py'),
+    ('macro_calendar', 'silver/build_macro_event_calendar.py'),
 ]
 
 SILVER = [

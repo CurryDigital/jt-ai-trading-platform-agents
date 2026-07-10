@@ -76,9 +76,17 @@ def _mark_freshness(error=None):
         print(f"  (freshness write skipped: {e})")
 
 if __name__ == "__main__":
+    # 2026-07-10: absorbed load_manual.py — a second CLI writing the same two
+    # tables with near-identical INSERTs. Cron mode (no args) is a no-op write
+    # that just marks freshness; operator mode passes --prices/--earnings.
+    import argparse
+    parser = argparse.ArgumentParser(description="Manual data entry ingest")
+    parser.add_argument('--prices',   help='Path to prices CSV')
+    parser.add_argument('--earnings', help='Path to earnings CSV')
+    args = parser.parse_args()
     try:
-        ingest_manual_prices()
-        ingest_manual_earnings()
+        ingest_manual_prices(args.prices)
+        ingest_manual_earnings(args.earnings)
         _mark_freshness()
     except Exception as e:
         _mark_freshness(error=str(e))
