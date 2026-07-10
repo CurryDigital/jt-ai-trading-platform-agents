@@ -277,8 +277,14 @@ echo "------------------------------------------"
 run_gold "Crypto KPIs" "gold/crypto/crypto_metrics.py"
 run_gold "Crypto metrics build" "gold/crypto/build_crypto_kpis.py"
 
-# All asset types
-for asset in equity fx commodity market portfolio ipo strategy; do
+# All asset types.
+# 2026-07-10: 'strategy' removed from this list — signal GENERATION moved to
+# agents/signals/pipeline/ (run by run_signal_cycle.sh AFTER this script).
+# gold/strategy/ now only holds build_attention_items.py, run explicitly
+# below. NOTE for the loop's semantics: gold/market/*.py scripts swept here
+# are ALSO re-run explicitly below (double-run; idempotent but wasteful) —
+# kept as-is pending an operator decision on intended ordering.
+for asset in equity fx commodity market portfolio ipo; do
     if [ -d "gold/${asset}" ]; then
         for f in gold/${asset}/*.py; do
             if [ -f "$f" ]; then
@@ -309,17 +315,18 @@ run_gold "Manual positions fold-in" "gold/portfolio/build_manual_positions.py"
 run_gold "IBKR promote" "gold/promote_ibkr.py"
 run_gold "IBKR orders promote" "gold/promote_ibkr_orders.py"
 
-# S9 MACD signal generation
-run_gold "S9 MACD signals" "gold/strategy/s9_macd_daily.py"
-
-# Research-approved live signals (paper trading)
-run_gold "Small-Cap Credit Spread signal" "gold/strategy/ingest_small_cap_credit_spread.py"
-
-# ETF paper-trading signals and runners
-run_gold "ETF Multi-Asset signal" "build_etf_multi_asset_paper_signal.sql"
-run_gold "ETF Covered-Call signal" "build_etf_covered_call_paper_signal.sql"
-run_gold "ETF Multi-Asset paper runner" "paper_run_etf_multi_asset.py"
-run_gold "ETF Covered-Call paper runner" "paper_run_etf_covered_call.py"
+# 2026-07-10: signal generation removed from this script entirely — it now
+# lives in agents/signals/pipeline/ and runs via run_signal_cycle.sh, which
+# gates on gold_layer_state so signals are never computed from a broken
+# gold layer. What moved and why the old lines were broken anyway:
+#   gold/strategy/s9_macd_daily.py            → agents/signals/pipeline/
+#   gold/strategy/ingest_small_cap_credit_spread.py — file no longer exists
+#       (consolidated into agents/signals/pipeline/ingest_paper_signal.py);
+#       this line had been failing on every run since the consolidation.
+#   build_etf_*_paper_signal.sql — were invoked as ${PYTHON} <file>.sql,
+#       i.e. Python parsing SQL: SyntaxError on EVERY run since they were
+#       added. Now executed properly (via db.py) in run_signal_cycle.sh.
+#   paper_run_etf_*.py                        → agents/signals/pipeline/
 
 if [ ${#FAILED_GOLD[@]} -gt 0 ]; then
     echo "⚠️ Gold failures: ${FAILED_GOLD[*]}"

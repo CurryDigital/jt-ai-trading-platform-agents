@@ -9,7 +9,7 @@ trade_count_oos, win_rate_oos, returns_oos, max_drawdown_oos and sharpe_oos
 are always populated consistently.
 
 Usage:
-    from gold.strategy.backtest_metrics import compute_oos_metrics
+    from pipeline.backtest_metrics import compute_oos_metrics  # agents/signals/
     metrics = compute_oos_metrics(oos_returns, trade_count=...)
     # then INSERT/UPDATE gold.strategy_backtest_runs with metrics dict
 """

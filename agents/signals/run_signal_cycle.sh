@@ -83,6 +83,78 @@ esac
 
 # ── Run the signal generation ─────────────────────────────────────────────
 cd "${SIGNALS_DIR}"
+
+# ── Signal pipeline (moved here from agents/etl/daily_refresh.sh 2026-07-10:
+#    signal GENERATION is this agent's job; the ETL cron only builds data) ──
+run_pipeline_step() {
+    local name="$1"
+    local script="$2"
+    shift 2
+    echo "→ ${name}..."
+    if timeout -k 10s 180s "${PYTHON}" "${script}" "$@"; then
+        echo "  ✅ ${name} complete"
+    else
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            echo "  ⏱️ ${name} TIMEOUT after 180s"
+        else
+            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
+        fi
+        PIPELINE_FAILURES+=("${name}")
+    fi
+}
+
+run_pipeline_sql() {
+    # The old daily_refresh.sh ran these as ${PYTHON} <file>.sql — Python
+    # parsing SQL, a SyntaxError on every single run since the lines were
+    # added. Execute properly through the canonical db.py connection.
+    local name="$1"
+    local sql_file="$2"
+    echo "→ ${name}..."
+    if timeout -k 10s 180s "${PYTHON}" -c "
+import sys
+sys.path.insert(0, '${ETL_SHARED}')
+from db import get_connection
+sql = open('${sql_file}').read()
+conn = get_connection()
+try:
+    with conn.cursor() as cur:
+        cur.execute(sql)
+    conn.commit()
+finally:
+    conn.close()
+print('applied ${sql_file}')
+"; then
+        echo "  ✅ ${name} complete"
+    else
+        echo "  ⚠️ ${name} FAILED (exit $?)"
+        PIPELINE_FAILURES+=("${name}")
+    fi
+}
+
+PIPELINE_FAILURES=()
+
+# 1. Criteria-based scoring: gold.strategy_signal_criteria × universe_tickers
+#    → gold.strategy_ticker_scores
+run_pipeline_step "Strategy scores" "pipeline/build_strategy_scores.py"
+
+# 2. S9 MACD daily signal generation
+run_pipeline_step "S9 MACD signals" "pipeline/s9_macd_daily.py"
+
+# 3. ETF paper-trading signal refresh + paper runners
+run_pipeline_sql  "ETF Multi-Asset signal" "pipeline/build_etf_multi_asset_paper_signal.sql"
+run_pipeline_sql  "ETF Covered-Call signal" "pipeline/build_etf_covered_call_paper_signal.sql"
+run_pipeline_step "ETF Multi-Asset paper runner" "pipeline/paper_run_etf_multi_asset.py"
+run_pipeline_step "ETF Covered-Call paper runner" "pipeline/paper_run_etf_covered_call.py"
+
+# 4. Sync OOS backtest stats into gold.strategy_registry
+run_pipeline_step "Registry backtest sync" "pipeline/update_strategy_registry.py"
+
+if [ ${#PIPELINE_FAILURES[@]} -gt 0 ]; then
+    echo "⚠️ Signal pipeline failures: ${PIPELINE_FAILURES[*]}"
+fi
+
+# ── Registry-strategy signal generation ───────────────────────────────────
 "${PYTHON}" strategies/run_signals.py
 RC=$?
 

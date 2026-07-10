@@ -49,7 +49,7 @@ import pytz
 # Repo-relative import — the predecessors hardcoded the absolute Hermes
 # profile path (~/.hermes/profiles/qr_etl/...), which broke anywhere else.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..", "shared", "scripts"))
+SHARED = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..", "etl", "shared", "scripts"))
 sys.path.insert(0, SHARED)
 os.environ.setdefault("AWS_REGION", "ap-southeast-1")
 from db import get_connection  # noqa: E402

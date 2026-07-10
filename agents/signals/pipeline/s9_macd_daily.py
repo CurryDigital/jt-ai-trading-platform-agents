@@ -15,7 +15,11 @@ S9_MACD_Momentum_V2 — Daily Signal Generation
 5. Upserts paper trades to gold.s9_paper_trades
 """
 import sys, os
-sys.path.insert(0, '/home/ubuntu/.hermes/profiles/qr_etl/home/trading-platform/agents/etl/shared/scripts')
+# Signal-agent layout: agents/signals/pipeline/<this file>;
+# canonical DB pool lives in agents/etl/shared/scripts/db.py.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ETL_SHARED = os.path.normpath(os.path.join(_HERE, '..', '..', 'etl', 'shared', 'scripts'))
+if _ETL_SHARED not in sys.path: sys.path.insert(0, _ETL_SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
