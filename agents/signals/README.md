@@ -38,8 +38,9 @@ python3 strategies/register_strategy.py --help
 | `strategies/run_signals.py` | Iterates enabled strategies, writes signals |
 | `strategies/register_strategy.py` | CLI for new strategies |
 | `strategies/STRATEGIES.md` | Onboarding doc |
-| `strategies/stubs.py` | Disabled stub classes (kept so historic IDs are reserved) |
-| `strategies/trend/strategy_NN.py` | Real strategy implementations |
+| `strategies/experimental/` | New + unproven strategies (mirrors DB priority=EXPERIMENTAL) |
+| `strategies/near_golden/` | OOS-validated, pending approval (priority=NEAR_GOLDEN) |
+| `strategies/golden/` | Approved strategies (priority=GOLDEN) |
 | `regime/regime_rules.py` | `assign_regime()` + `STRATEGY_MAP` (derived from registry) |
 | `regime/train_hmm.py` | HMM training (offline) |
 | `tests/test_registry_loader.py` | 10 unit tests for the loader |

@@ -17,26 +17,46 @@ The new workflow is **one CLI command + one file**.
 
 If you change `registry.json`, the next 30-minute cron picks it up. **No restart, no deploy.**
 
+### Folder layout — maturity tiers
+
+Strategy files live under a tier folder that mirrors the frontend/DB
+`gold.strategy_registry.priority` vocabulary:
+
+```
+strategies/
+  experimental/   ← every new strategy starts here (priority=EXPERIMENTAL)
+  near_golden/    ← passed OOS backtest gates, pending approval (priority=NEAR_GOLDEN)
+  golden/         ← approved, paper/live capital assigned (priority=GOLDEN)
+```
+
+**Promotion is a deliberate, single-commit act**: `git mv` the file to the
+next tier folder, update `tier` + `class_path` in `registry.json`, and update
+the DB row's `priority`. The loader refuses a registry whose `tier` claim
+doesn't match the folder in `class_path`, so the tree can't silently lie
+about maturity.
+
 ### `registry.json` entry format
 
 ```json
 {
   "id": 21,
   "name": "Crypto vol carry",
-  "class_path": "strategies.crypto.strategy_21:Strategy21",
+  "class_path": "strategies.experimental.strategy_21:Strategy21",
+  "tier": "experimental",
   "regime": "CARRY",
   "enabled": false,
   "asset_class": "crypto",
   "params": { },
-  "notes": "Registered 2026-06-22. Implement compute_signal() then flip enabled=true."
+  "notes": "Registered 2026-07-10. Implement compute_signal() then flip enabled=true."
 }
 ```
 
 | Field | Meaning |
 |-------|---------|
-| `id` | Integer. Unique. Persists in `gold.strategy_signals.strategy_id`. **Never reuse.** |
+| `id` | Integer. Unique. Persists in `gold.strategy_signals.strategy_id`. **Never reuse** — deleted strategies' ids move to the top-level `retired_ids` list and the loader rejects re-use. |
 | `name` | Short label for dashboards and logs. |
-| `class_path` | `module:ClassName`. Must be importable from the `agents/etl/` workspace root. |
+| `class_path` | `module:ClassName`. Must be importable from the `agents/signals/` root. |
+| `tier` | `experimental` / `near_golden` / `golden`. Must match the folder in `class_path`. |
 | `regime` | One of `TREND`, `MEAN_REV`, `CARRY`, `EVENT`, `FLAT`. Gates when the strategy is active. |
 | `enabled` | `true` = runs in cron, writes signals. `false` = imported only, never writes. |
 | `asset_class` | `equity` / `crypto` / `fx` / `commodity`. Used for filtering and reporting. |
@@ -50,20 +70,19 @@ If you change `registry.json`, the next 30-minute cron picks it up. **No restart
 ### 1. Register it
 
 ```bash
-cd agents/etl
+cd agents/signals
 python3 strategies/register_strategy.py \
     --id 21 \
     --name "Crypto vol carry" \
     --regime CARRY \
     --asset-class crypto \
-    --module strategies.crypto.strategy_21 \
     --class-name Strategy21
 ```
 
 This:
-- Validates against the existing registry (id collisions, allow-listed regime/asset_class).
-- Creates a stub `strategies/crypto/strategy_21.py` from a template.
-- Appends the entry to `registry.json` with `enabled=false` (safe default).
+- Validates against the existing registry (id collisions, retired ids, allow-listed regime/asset_class).
+- Creates a stub `strategies/experimental/strategy_21.py` from a template (new strategies always start experimental).
+- Appends the entry to `registry.json` with `enabled=false` and `tier=experimental` (safe defaults).
 
 ### 2. Implement `compute_signal()`
 
@@ -81,7 +100,7 @@ def compute_signal(self) -> int:
     ...
 ```
 
-Reference real implementations in `strategies/trend/`:
+Reference real implementations in `strategies/experimental/`:
 - `strategy_01.py` — Dual EMA crossover (basket of equity ETFs)
 - `strategy_02.py` — 52-week high momentum
 - `strategy_06.py` — BTC Donchian breakout
@@ -107,18 +126,10 @@ Edit `registry.json`, set `"enabled": false`. The strategy stays in the
 registry (so its id is reserved and its history is preserved) but stops
 contributing signals. No code edit needed.
 
-To **delete** a strategy permanently: remove the entry from `registry.json`
-AND delete the strategy file. Historical signals in `gold.strategy_signals`
-are preserved by `strategy_id`.
-
----
-
-## Special case — EIA day override
-
-`strategies/base_strategy.py::is_active_today()` has a hardcoded override:
-strategy with `id == 12` is forced active on EIA-day events
-(`gold.regime_label.severity == 1`). If you move the WTI EIA event drift
-strategy to a different id, update that override in base_strategy.py.
+To **delete** a strategy permanently: remove the entry from `registry.json`,
+add its id to the top-level `retired_ids` list, and delete the strategy file.
+Historical signals in `gold.strategy_signals` are preserved by `strategy_id`,
+which is exactly why the id must never be reused.
 
 ---
 

@@ -24,7 +24,6 @@ class BaseStrategy(ABC):
         Reads gold.regime_label for today.
         Returns True only if self.strategy_id is in
         active_strategies list for today's regime.
-        Also returns True on EIA days if strategy_id == 12.
         """
         cur = self.conn.cursor()
         cur.execute("""
@@ -41,9 +40,11 @@ class BaseStrategy(ABC):
         self._today_confidence = float(confidence) if confidence else 0.0
         self._today_event_flag = bool(severity == 1) if severity is not None else False
 
-        # EIA day special case: strategy 12 is always active on EIA days
-        if self.strategy_id == 12 and self._today_event_flag:
-            return True
+        # 2026-07-10: removed the "strategy 12 always active on EIA days"
+        # special case. Id 12 (WTI EIA event drift) was a never-implemented
+        # stub, deleted with the rest of stubs.py; id 12 is retired in
+        # registry.json. Keeping the override would have silently granted
+        # EIA-day activation to any future strategy that reused the id.
 
         # Load strategy map from regime_rules
         from regime.regime_rules import STRATEGY_MAP

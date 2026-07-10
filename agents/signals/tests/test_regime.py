@@ -172,16 +172,34 @@ def test_get_active_strategies_structure():
     assert result['regime'] in {'TREND', 'MEAN_REV', 'CARRY', 'EVENT', 'FLAT'}, \
         f"Invalid regime: {result['regime']}"
 
+# ── BaseStrategy test double ─────────────────────────────────────────────────
+# 2026-07-10: strategies/stubs.py was deleted (13 never-implemented stub
+# entries removed from registry.json; ids retired). These tests only need
+# *a* concrete BaseStrategy, not any particular strategy — a local test
+# double with a retired-range id is more honest than importing production
+# classes whose gating behavior depends on today's live regime.
+
+def _make_test_strategy(conn, strategy_id=999):
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from strategies.base_strategy import BaseStrategy
+
+    class _GateTestStrategy(BaseStrategy):
+        def __init__(self, c):
+            super().__init__(c, strategy_id, "gate test double")
+        def compute_signal(self):
+            if not self.is_active_today():
+                return 0
+            return 0
+
+    return _GateTestStrategy(conn)
+
 # ── Test 10 ───────────────────────────────────────────────────────────────────
 
 def test_regime_gate_blocks_inactive_strategies():
-    """Simulate regime = CARRY. Instantiate Strategy01 (TREND strategy).
-    Assert compute_signal() == 0 and result['active'] == False."""
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from strategies.stubs import Strategy01
-
+    """A strategy whose id is in NO regime's STRATEGY_MAP (id=999) must be
+    gated inactive regardless of today's regime."""
     conn = get_connection()
-    strat = Strategy01(conn)
+    strat = _make_test_strategy(conn, strategy_id=999)
     signal = strat.compute_signal()
     result = strat.run()
     conn.close()
@@ -192,27 +210,44 @@ def test_regime_gate_blocks_inactive_strategies():
 # ── Test 11 ───────────────────────────────────────────────────────────────────
 
 def test_regime_gate_allows_active_strategies():
-    """Simulate regime = CARRY. Instantiate Strategy07 (CARRY strategy).
-    Assert is_active_today() == True."""
+    """A strategy registered for TODAY'S actual regime must gate active.
+    (The old version hardcoded a CARRY stub and only passed on CARRY days.)
+    Skips if no enabled strategy exists for today's regime."""
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from strategies.stubs import Strategy07
+    from strategies.registry_loader import build_strategy_map
 
     conn = get_connection()
-    strat = Strategy07(conn)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT regime FROM gold.regime_label
+        WHERE date = (SELECT MAX(date) FROM gold.regime_label)
+    """)
+    row = cur.fetchone()
+    if row is None:
+        conn.close()
+        pytest.skip("gold.regime_label is empty — regime pipeline hasn't run")
+
+    todays_regime = row[0]
+    active_ids = build_strategy_map().get(todays_regime, [])
+    if not active_ids:
+        conn.close()
+        pytest.skip(f"no enabled strategy registered for today's regime {todays_regime!r}")
+
+    strat = _make_test_strategy(conn, strategy_id=active_ids[0])
     active = strat.is_active_today()
     conn.close()
 
-    assert active == True, f"Expected active=True for Strategy07 in CARRY regime, got {active}"
+    assert active == True, (
+        f"Strategy id={active_ids[0]} is in STRATEGY_MAP[{todays_regime!r}] "
+        f"but is_active_today() returned False"
+    )
 
 # ── Test 12 ───────────────────────────────────────────────────────────────────
 
 def test_position_sizer_returns_zero_when_flat():
     """Call size_position(signal=0, price=100, atr14=2). Assert result == 0.0"""
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from strategies.stubs import Strategy01
-
     conn = get_connection()
-    strat = Strategy01(conn)
+    strat = _make_test_strategy(conn)
     size = strat.size_position(signal=0, price=100, atr14=2)
     conn.close()
 
@@ -223,11 +258,8 @@ def test_position_sizer_returns_zero_when_flat():
 def test_position_sizer_returns_correct_size():
     """Call size_position(signal=1, price=100, atr14=2).
     Expected: (100_000 * 0.01) / (2 * 100) = 5.0 units"""
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from strategies.stubs import Strategy01
-
     conn = get_connection()
-    strat = Strategy01(conn)
+    strat = _make_test_strategy(conn)
     size = strat.size_position(signal=1, price=100, atr14=2)
     conn.close()
 

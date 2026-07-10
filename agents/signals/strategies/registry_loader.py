@@ -32,6 +32,10 @@ REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "regist
 
 VALID_REGIMES = {"TREND", "MEAN_REV", "CARRY", "EVENT", "FLAT"}
 VALID_ASSET_CLASSES = {"equity", "crypto", "fx", "commodity"}
+# Maturity tiers, mirroring gold.strategy_registry.priority
+# (EXPERIMENTAL / NEAR_GOLDEN / GOLDEN). The tier must match the folder the
+# strategy file lives in: strategies/<tier>/strategy_NN.py.
+VALID_TIERS = {"experimental", "near_golden", "golden"}
 
 
 class RegistryError(ValueError):
@@ -46,6 +50,7 @@ class StrategyEntry:
     regime: str
     enabled: bool
     asset_class: str
+    tier: str = "experimental"
     params: Dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 
@@ -81,6 +86,22 @@ def _validate(entry: Dict[str, Any], seen_ids: set) -> StrategyEntry:
             f"class_path must be 'module.path:ClassName', got {entry['class_path']!r}"
         )
 
+    tier = entry.get("tier", "experimental")
+    if tier not in VALID_TIERS:
+        raise RegistryError(
+            f"Unknown tier {tier!r} for id={entry['id']}. Valid: {sorted(VALID_TIERS)}"
+        )
+    # The tier claim and the file's actual location must agree, otherwise the
+    # folder structure silently lies about maturity. Only enforced for real
+    # in-package paths (strategies.<tier>.*) — external/test class_paths are
+    # exempt since they have no tier folder to match.
+    module_path = entry["class_path"].partition(":")[0]
+    if module_path.startswith("strategies.") and not module_path.startswith(f"strategies.{tier}."):
+        raise RegistryError(
+            f"id={entry['id']}: tier={tier!r} but class_path {entry['class_path']!r} "
+            f"is not under strategies/{tier}/ — move the file or fix the tier."
+        )
+
     return StrategyEntry(
         id=entry["id"],
         name=entry["name"],
@@ -88,6 +109,7 @@ def _validate(entry: Dict[str, Any], seen_ids: set) -> StrategyEntry:
         regime=entry["regime"],
         enabled=bool(entry["enabled"]),
         asset_class=entry["asset_class"],
+        tier=tier,
         params=dict(entry.get("params") or {}),
         notes=entry.get("notes", ""),
     )
@@ -103,8 +125,19 @@ def load_registry(path: Optional[str] = None) -> List[StrategyEntry]:
     if not isinstance(entries_raw, list):
         raise RegistryError(f"registry.json must have a top-level 'strategies' list. Got: {type(entries_raw).__name__}")
 
+    # Ids of deleted strategies stay retired forever: gold.strategy_signals
+    # rows keyed on them still exist, so re-using an id would silently graft
+    # a new strategy onto an old strategy's signal history.
+    retired = set(data.get("retired_ids") or [])
     seen_ids: set = set()
-    return [_validate(e, seen_ids) for e in entries_raw]
+    entries = [_validate(e, seen_ids) for e in entries_raw]
+    for e in entries:
+        if e.id in retired:
+            raise RegistryError(
+                f"id={e.id} is in retired_ids — it belonged to a deleted strategy "
+                f"whose gold.strategy_signals history still exists. Pick a fresh id."
+            )
+    return entries
 
 
 def load_enabled_strategies(path: Optional[str] = None) -> List[StrategyEntry]:

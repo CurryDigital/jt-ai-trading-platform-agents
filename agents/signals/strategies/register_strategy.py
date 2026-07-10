@@ -3,20 +3,26 @@
 register_strategy.py — CLI to onboard a new trading strategy.
 
 Replaces the previous 3-file manual edit (strategies/run_signals.py imports,
-strategies/stubs.py classes, regime/regime_rules.py::STRATEGY_MAP) with one
-command:
+stub classes, regime/regime_rules.py::STRATEGY_MAP) with one command:
 
     python3 strategies/register_strategy.py \
         --id 21 \
         --name "Crypto vol carry" \
         --regime CARRY \
         --asset-class crypto \
-        --class-name Strategy21 \
-        --module strategies.crypto.strategy_21
+        --class-name Strategy21
+
+New strategies always start in strategies/experimental/ — the tier mirrors
+gold.strategy_registry.priority (EXPERIMENTAL/NEAR_GOLDEN/GOLDEN) and
+promotion is deliberate: git mv the file to strategies/near_golden/ or
+strategies/golden/, update tier + class_path in registry.json, and update
+the DB row, in one commit. There is no --tier flag on purpose; nothing is
+born golden.
 
 What it does (in order, atomically):
-  1. Validates the new entry against registry.json (no id collision, no
-     class_path collision, regime + asset_class allow-listed).
+  1. Validates the new entry against registry.json (no id collision, id not
+     in retired_ids, no class_path collision, regime + asset_class
+     allow-listed).
   2. Creates a stub strategy class file from a template — only if it
      doesn't already exist.
   3. Appends the entry to registry.json with enabled=false (so the
@@ -57,7 +63,7 @@ import sys
 import os
 
 # Signal-agent layout (post 2026-06-22 split):
-#   agents/signals/strategies/<regime>/strategy_NN.py  ← this file
+#   agents/signals/strategies/<tier>/strategy_NN.py  ← this file
 #   agents/etl/shared/scripts/db.py                     ← canonical DB pool
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SIGNALS_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..'))
@@ -97,7 +103,7 @@ def _save_registry(data: Dict[str, Any]) -> None:
 
 
 def _class_path_to_file(module_path: str) -> str:
-    """strategies.trend.strategy_21 → agents/signals/strategies/trend/strategy_21.py"""
+    """strategies.experimental.strategy_21 → agents/signals/strategies/experimental/strategy_21.py"""
     parts = module_path.split(".")
     if parts[0] != "strategies":
         raise SystemExit(
@@ -116,8 +122,10 @@ def main() -> int:
                    help="Regime this strategy is active in")
     p.add_argument("--asset-class", required=True, choices=sorted(VALID_ASSET_CLASSES),
                    help="Asset class (used for filtering & reporting)")
-    p.add_argument("--module", required=True,
-                   help="Module path, e.g. strategies.trend.strategy_21")
+    p.add_argument("--module", default=None,
+                   help="Module path (default: strategies.experimental.strategy_<id>). "
+                        "Must be under strategies.experimental — new strategies "
+                        "start experimental; promotion is a deliberate git mv.")
     p.add_argument("--class-name", required=True,
                    help="Class name, e.g. Strategy21")
     p.add_argument("--enabled", action="store_true",
@@ -126,6 +134,13 @@ def main() -> int:
     p.add_argument("--force", action="store_true",
                    help="Overwrite an existing strategy file (DANGEROUS)")
     args = p.parse_args()
+
+    if args.module is None:
+        args.module = f"strategies.experimental.strategy_{args.id:02d}"
+    if not args.module.startswith("strategies.experimental."):
+        sys.exit(f"FATAL: new strategies must live under strategies.experimental "
+                 f"(got {args.module!r}). Promotion to near_golden/golden is a "
+                 f"deliberate git mv after OOS validation, not an onboarding flag.")
 
     # Load and validate against existing registry.
     data = _load_registry()
@@ -136,6 +151,10 @@ def main() -> int:
     if args.id in by_id:
         sys.exit(f"FATAL: strategy id={args.id} already exists "
                  f"({by_id[args.id]['name']!r}). Pick another id.")
+    if args.id in set(data.get("retired_ids") or []):
+        sys.exit(f"FATAL: strategy id={args.id} is retired — it belonged to a "
+                 f"deleted strategy whose gold.strategy_signals history still "
+                 f"exists. Pick a fresh id.")
 
     class_path = f"{args.module}:{args.class_name}"
     if class_path in by_class_path:
@@ -164,6 +183,7 @@ def main() -> int:
         "id": args.id,
         "name": args.name,
         "class_path": class_path,
+        "tier": "experimental",
         "regime": args.regime,
         "enabled": bool(args.enabled),
         "asset_class": args.asset_class,

@@ -13,7 +13,7 @@ import sys, os
 import pandas as pd
 
 # Signal-agent layout (post 2026-06-22 split):
-#   agents/signals/strategies/trend/strategy_NN.py  ← this file
+#   agents/signals/strategies/experimental/strategy_NN.py  ← this file
 #   agents/etl/shared/scripts/db.py                  ← canonical DB pool (cross-agent dep)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SIGNALS_ROOT = os.path.normpath(os.path.join(SCRIPT_DIR, '..', '..'))
