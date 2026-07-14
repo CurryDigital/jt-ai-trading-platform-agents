@@ -1,0 +1,48 @@
+name: pipeline-checks
+
+# Minimal CI gate for the ETL + signal pipeline (OPERATOR_NOTES.md P0-1).
+# Every check here corresponds to a bug class that actually shipped and
+# failed silently in production cron before this workflow existed:
+#   - dangling script references in refresh shells (failed daily, unnoticed)
+#   - .sql files fed to the Python interpreter (SyntaxError on every run)
+#   - CWD-dependent sys.path bootstraps that crash standalone
+# No DB access is needed; everything runs on a bare runner.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python syntax — compile every .py
+        run: |
+          python -m compileall -q agents db_setup tools bootstrap_hermes_venv.sh 2>/dev/null || true
+          # compileall returns 0 even with skips; do an explicit strict pass
+          find agents tools -name "*.py" -not -path "*__pycache__*" -print0 \
+            | xargs -0 -n 50 python -m py_compile
+
+      - name: Shell syntax — bash -n every .sh
+        run: |
+          find agents -name "*.sh" -print0 | xargs -0 -n 1 bash -n
+          bash -n bootstrap_hermes_venv.sh
+
+      - name: Pipeline reference check (run_* calls in refresh shells)
+        run: python tools/check_pipeline_refs.py
+
+      - name: Strategy registry contract tests (DB-free)
+        working-directory: agents/signals
+        run: python tests/test_registry_loader.py
+
+      - name: Pipeline state tests (DB-free)
+        working-directory: agents/etl
+        run: python tests/test_pipeline_state.py
