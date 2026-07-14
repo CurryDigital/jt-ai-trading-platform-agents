@@ -100,6 +100,14 @@ def _upsert_prices(cur, ticker, df):
     global _n_row_errors, _n_rows_attempted
     inserted = 0
     for _, row in df.iterrows():
+        # 2026-07-10 (P1-7): don't insert no-bar rows. Yahoo returns all-NaN
+        # rows for market holidays (e.g. 2026-06-19 Juneteenth) when a batch
+        # includes any ticker that DID trade that day. A NULL-close row is
+        # useless to every consumer and one such row blocked gold.daily_ohlcv
+        # for SPY for 15 days — a missing row is the honest representation of
+        # "no bar happened".
+        if not (row['Close'] == row['Close']):  # NaN check without pd dependency
+            continue
         _n_rows_attempted += 1
         try:
             cur.execute("""
@@ -206,6 +214,8 @@ def ingest_commodity_futures(days_back: int = 7, max_tickers: int = 10):
             meta = COMMODITY_META.get(ticker, (ticker, 'unknown', 'unknown'))
 
             for ts, row in data.iterrows():
+                if not pd.notna(row['Close']):  # no-bar (holiday) row — skip, see _upsert_prices
+                    continue
                 try:
                     cur.execute("""
                         INSERT INTO bronze.yf_commodity_futures
