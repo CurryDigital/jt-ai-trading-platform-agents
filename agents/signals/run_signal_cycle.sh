@@ -174,6 +174,11 @@ else
     echo "  ⚠️ run_signals.py failed — skipping redesign signal tables"
 fi
 
+# ── Signal history snapshot (P0-3) — LAST step so it captures the day's
+#    final scores from every writer above. Without this, strategy_ticker_
+#    scores overwrites itself and yesterday's signals are unrecoverable. ──
+run_pipeline_step "Signal history snapshot" "pipeline/snapshot_ticker_scores.py"
+
 echo "=========================================="
 echo "SIGNAL CYCLE COMPLETED: $(date)"
 echo "run_signals.py exit code: ${RC}"

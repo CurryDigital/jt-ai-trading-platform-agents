@@ -16,6 +16,7 @@ gold layer.
 | `paper_run_etf_multi_asset.py` / `paper_run_etf_covered_call.py` | Daily paper-trading runners → `gold.paper_run_log` |
 | `build_etf_multi_asset_paper_signal.sql` / `build_etf_covered_call_paper_signal.sql` | ETF paper signal SQL refresh (executed via db.py; the old cron ran them through the *Python interpreter* — broken since added) |
 | `update_strategy_registry.py` | Syncs OOS backtest stats from `gold.strategy_backtests` into `gold.strategy_registry` (known id-space mismatch — see file header) |
+| `snapshot_ticker_scores.py` | FINAL cycle step: appends today's final `strategy_ticker_scores` state to `gold.strategy_ticker_scores_history` (migration 005) — the basis for honest hit-rate/forward-return measurement |
 | `backtest_metrics.py` | Importable helpers for consistent OOS metric computation |
 
 ## ⚠️ Server-side cron note (operator action)
