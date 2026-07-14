@@ -51,7 +51,7 @@ operator decision, not a cleanup side effect.
 
 Ordered by impact. P0 = prevents the bug classes we actually hit this month.
 
-### P0-1. CI syntax/reference gate
+### P0-1. CI syntax/reference gate ✅ DONE 2026-07-10 (`.github/workflows/pipeline-checks.yml` + `tools/check_pipeline_refs.py`)
 The `${PYTHON} <file>.sql` bug (Python parsing SQL, failing every run) and
 the dangling `ingest_small_cap_credit_spread.py` reference both shipped
 because nothing checks the repo at commit time. A minimal GitHub Action
@@ -63,7 +63,7 @@ would have caught both:
   run_consumption/run_pipeline_step` in the refresh shells and asserts the
   file exists and its extension matches the runner.
 
-### P0-2. Unify the three strategy-id spaces
+### P0-2. Unify the three strategy-id spaces 🟡 PLUMBING DONE 2026-07-10 (migration 006 bridge column + sync rewrite) — **operator must backfill the numeric→semantic mapping**, see migration header
 `registry.json` uses numeric ids (1–20), `gold.strategy_registry` uses
 semantic varchar ids (`btc_funding_mean_rev_short`), and
 `gold.strategy_backtests` uses smallint ids. Consequences observed live:
@@ -73,7 +73,7 @@ to keyword guessing. Recommendation: make `gold.strategy_registry.strategy_id`
 canonical; add a varchar `strategy_id` to `strategy_backtests`; store the
 semantic id in `registry.json` entries alongside the numeric signal id.
 
-### P0-3. Signal history
+### P0-3. Signal history ✅ DONE 2026-07-10 (migration 005 + `snapshot_ticker_scores.py` as final cycle step) — apply migration 005 on prod
 `gold.strategy_ticker_scores` is a single-row-per-(strategy, ticker) upsert —
 every run overwrites the previous score. There is **no record of what the
 system's signal was yesterday**, which makes signal-quality measurement
@@ -83,7 +83,7 @@ to show honestly) impossible by construction. Add an append-only
 written each cycle; then `signal_family_performance` can be computed from
 realized outcomes instead of staying empty (or worse, fabricated).
 
-### P1-4. Batch the row-by-row upserts
+### P1-4. Batch the row-by-row upserts 🟡 STARTED 2026-07-10 (yfinance prices done via execute_values + savepoint fallback; COT loaders and gold builders remain)
 `_upsert_prices` (yfinance), the COT loaders, and several gold builders
 iterate DataFrames calling `cur.execute` per row — 10k+ round trips per
 daily run. `psycopg2.extras.execute_values` is a drop-in ~10–50× speedup
@@ -97,14 +97,14 @@ cadence, timeout, enabled) + one runner would replace the duplicated
 `run_*` functions across daily/hourly/weekly shells and make "what runs
 when" reviewable in a single diff.
 
-### P1-6. Standardize freshness marking
+### P1-6. Standardize freshness marking 🟡 STARTED 2026-07-10 (`freshness_guard` context manager added to shared/scripts/freshness.py; ingest_yfinance_prices.py converted as the reference — remaining scripts to migrate opportunistically)
 `gold.source_freshness` coverage is opt-in per script — some mark, some
 don't (ingest_yfinance_prices.py only gained it in this review). Wrap it
 once in `shared/scripts` (context manager or decorator) and require it via
 the P0-1 CI grep, so the staleness monitor's picture is complete rather
 than "fresh where instrumented".
 
-### P1-7. Skip all-NULL bronze rows at ingest
+### P1-7. Skip all-NULL bronze rows at ingest ✅ DONE 2026-07-10 (equities + commodity futures)
 The 2026-06-19 (Juneteenth) row landed in `bronze.yf_prices` with every
 OHLC field NULL and then blocked gold's NOT NULL filter for weeks. The
 COALESCE upsert fix stops the freezing, but ingest should simply not insert

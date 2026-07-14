@@ -90,15 +90,42 @@ _n_rows_attempted = 0
 ROW_ERROR_RATE_THRESHOLD = 0.05
 
 
+_UPSERT_PRICES_SQL = """
+    INSERT INTO bronze.yf_prices
+        (ticker, date, open, high, low, close, volume,
+         adjusted_close, ingested_at)
+    VALUES %s
+    ON CONFLICT (ticker, date) DO UPDATE SET
+        open = COALESCE(EXCLUDED.open, bronze.yf_prices.open),
+        high = COALESCE(EXCLUDED.high, bronze.yf_prices.high),
+        low = COALESCE(EXCLUDED.low, bronze.yf_prices.low),
+        close = COALESCE(EXCLUDED.close, bronze.yf_prices.close),
+        volume = COALESCE(EXCLUDED.volume, bronze.yf_prices.volume),
+        adjusted_close = COALESCE(EXCLUDED.adjusted_close, bronze.yf_prices.adjusted_close)
+"""
+_UPSERT_PRICES_TEMPLATE = "(%s, %s, %s, %s, %s, %s, %s, %s, NOW())"
+
+
 def _upsert_prices(cur, ticker, df):
     """Upsert a single ticker's price DataFrame. Returns inserted count.
 
     2026-07-03: ON CONFLICT COALESCEs every column instead of only refreshing
     close/volume/adjusted_close. Yahoo often returns a same-day row with Close
     populated but Open/High/Low still NaN (bar not finalized); the old clause
-    froze open/high/low at NULL forever because it never wrote them again."""
+    froze open/high/low at NULL forever because it never wrote them again.
+
+    2026-07-10 (P1-4): batched via execute_values — one statement per ticker
+    instead of one DB round trip per (ticker, date) row (~10k round trips per
+    daily run). On a batch failure, falls back to row-by-row with SAVEPOINTs
+    to isolate the bad row(s). The savepoints also fix a latent bug in the
+    old loop: the first row error aborted the whole transaction, so every
+    subsequent "row error" was really InFailedSqlTransaction noise and the
+    remaining rows of the batch were silently lost.
+    """
     global _n_row_errors, _n_rows_attempted
-    inserted = 0
+    from psycopg2.extras import execute_values
+
+    rows = []
     for _, row in df.iterrows():
         # 2026-07-10 (P1-7): don't insert no-bar rows. Yahoo returns all-NaN
         # rows for market holidays (e.g. 2026-06-19 Juneteenth) when a batch
@@ -106,36 +133,45 @@ def _upsert_prices(cur, ticker, df):
         # useless to every consumer and one such row blocked gold.daily_ohlcv
         # for SPY for 15 days — a missing row is the honest representation of
         # "no bar happened".
-        if not (row['Close'] == row['Close']):  # NaN check without pd dependency
+        if not pd.notna(row['Close']):
             continue
-        _n_rows_attempted += 1
+        rows.append((
+            ticker,
+            row['Date'].date() if hasattr(row['Date'], 'date') else row['Date'],
+            float(row['Open'])   if pd.notna(row['Open'])   else None,
+            float(row['High'])   if pd.notna(row['High'])   else None,
+            float(row['Low'])    if pd.notna(row['Low'])    else None,
+            float(row['Close']),
+            int(row['Volume'])   if pd.notna(row['Volume']) else None,
+            float(row['Close']),
+        ))
+
+    if not rows:
+        return 0
+    _n_rows_attempted += len(rows)
+
+    try:
+        cur.execute("SAVEPOINT upsert_batch")
+        execute_values(cur, _UPSERT_PRICES_SQL, rows,
+                       template=_UPSERT_PRICES_TEMPLATE, page_size=500)
+        cur.execute("RELEASE SAVEPOINT upsert_batch")
+        return len(rows)
+    except Exception as batch_err:
+        cur.execute("ROLLBACK TO SAVEPOINT upsert_batch")
+        print(f"    Batch upsert failed for {ticker} ({batch_err}) — retrying row-by-row")
+
+    inserted = 0
+    single_sql = _UPSERT_PRICES_SQL.replace("VALUES %s", f"VALUES {_UPSERT_PRICES_TEMPLATE}")
+    for r in rows:
         try:
-            cur.execute("""
-                INSERT INTO bronze.yf_prices
-                    (ticker, date, open, high, low, close, volume,
-                     adjusted_close, ingested_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (ticker, date) DO UPDATE SET
-                    open = COALESCE(EXCLUDED.open, bronze.yf_prices.open),
-                    high = COALESCE(EXCLUDED.high, bronze.yf_prices.high),
-                    low = COALESCE(EXCLUDED.low, bronze.yf_prices.low),
-                    close = COALESCE(EXCLUDED.close, bronze.yf_prices.close),
-                    volume = COALESCE(EXCLUDED.volume, bronze.yf_prices.volume),
-                    adjusted_close = COALESCE(EXCLUDED.adjusted_close, bronze.yf_prices.adjusted_close)
-            """, (
-                ticker,
-                row['Date'].date() if hasattr(row['Date'], 'date') else row['Date'],
-                float(row['Open'])   if pd.notna(row['Open'])   else None,
-                float(row['High'])   if pd.notna(row['High'])   else None,
-                float(row['Low'])    if pd.notna(row['Low'])    else None,
-                float(row['Close'])  if pd.notna(row['Close'])  else None,
-                int(row['Volume'])   if pd.notna(row['Volume']) else None,
-                float(row['Close'])  if pd.notna(row['Close'])  else None,
-            ))
+            cur.execute("SAVEPOINT upsert_row")
+            cur.execute(single_sql, r)
+            cur.execute("RELEASE SAVEPOINT upsert_row")
             inserted += 1
         except Exception as e:
+            cur.execute("ROLLBACK TO SAVEPOINT upsert_row")
             _n_row_errors += 1
-            print(f"    Row error {ticker}: {e}")
+            print(f"    Row error {ticker} {r[1]}: {e}")
     return inserted
 
 # ── Equity / ETF Prices (chunked) ─────────────────────────────────────────────
@@ -278,11 +314,11 @@ def _check_row_error_rate():
 
 
 if __name__ == "__main__":
-    try:
+    # freshness_guard (P1-6) marks gold.source_freshness on success and
+    # records + re-raises on failure. The row-error-rate gate runs after:
+    # it may overwrite the success mark with an error and exit non-zero.
+    from freshness import freshness_guard
+    with freshness_guard(source='yfinance'):
         ingest_yf_prices()
         ingest_commodity_futures()
-        _check_row_error_rate()
-        _mark_freshness()
-    except Exception as e:
-        _mark_freshness(error=str(e))
-        raise
+    _check_row_error_rate()

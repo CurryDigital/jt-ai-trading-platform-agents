@@ -96,3 +96,51 @@ def mark_source_refreshed(
             file=sys.stderr,
         )
         return False
+
+
+class freshness_guard:
+    """
+    Context manager that standardizes the try/except/_mark_freshness pattern
+    hand-copied (inconsistently) across ingest scripts — several scripts had
+    no freshness marking at all, leaving the staleness monitor blind to them
+    (OPERATOR_NOTES.md P1-6).
+
+    Usage (replaces the whole __main__ boilerplate):
+
+        from freshness import freshness_guard
+        if __name__ == "__main__":
+            with freshness_guard(source='yfinance'):
+                ingest_prices()
+                ingest_commodity_futures()
+
+    - Body succeeds  → mark_source_refreshed(source, ...) with a fresh
+      connection; soft-fails like mark_source_refreshed itself.
+    - Body raises    → the error is recorded to gold.source_freshness AND
+      re-raised, so cron still sees a non-zero exit. Never swallows.
+
+    Opens its own short-lived connection so callers don't have to thread one
+    through, and so a connection the body crashed can't poison the marking.
+    """
+
+    def __init__(self, source: str, **mark_kwargs):
+        self.source = source
+        self.mark_kwargs = mark_kwargs
+
+    def _mark(self, error=None):
+        try:
+            from db import get_connection
+            conn = get_connection()
+            try:
+                mark_source_refreshed(conn, source=self.source,
+                                      error=error, **self.mark_kwargs)
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"  (freshness write skipped: {e})", file=sys.stderr)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._mark(error=str(exc) if exc is not None else None)
+        return False  # never swallow the body's exception
