@@ -46,21 +46,54 @@ operator decision, not a cleanup side effect.
 - [ ] `DROP TABLE gold.stock_metrics` (or document a reason to keep it)
 
 ### 4. `gold.strategy_signals` id-space collision (found 2026-07-17)
-The diagnostic showed two DIFFERENT strategies sharing the same smallint
-`strategy_id` in `gold.strategy_signals`: id=1 has rows named both
-'Dual EMA crossover' (signal agent) AND 'cot_contrarian_extreme' (semantic
-strategy); same for id=2 ('52-week high momentum' / 'cl_cot_trend') and
-id=3 ('RSI(2) mean reversion' / 'gc_cot_contrarian_inverse'). Something —
-likely a qr_research writer — inserted semantic strategies' signals using
-numeric ids that collide with the signal agent's id space. Since the PK is
-`(date, strategy_id)`, a same-day write from both silently overwrites one
-of them. Find the semantic writer, stop it using this table (or give it
-its own semantic-keyed signals table), and treat the 3 colliding history
-rows as suspect. Related: `strategy_backtests` rows id=2 and id=3 carry
-byte-identical metrics — a copy artifact, further evidence this legacy
-table shouldn't receive new writes.
+RESOLVED-ROOT-CAUSE 2026-07-17: the writer was identified — a transient
+kanban recovery script (`~/.hermes/kanban/boards/trading/workspaces/
+t_e8dd1cf1/refresh_pipeline.py`) wrote 3 semantic-strategy rows with
+numeric ids 1/2/3 on 2026-05-29, one time. No ACTIVE writer misuses the
+table; `gold.strategy_signals` remains exclusively the signal agent's
+numeric-keyed table (written by `base_strategy.save()`), and semantic
+strategies flow through `strategy_ticker_scores` (+ history). Remaining
+operator action — delete the 3 junk rows (prod data deletion, operator
+runs it):
 
-- [ ] Semantic signal writer identified and moved off gold.strategy_signals
+```sql
+DELETE FROM gold.strategy_signals
+WHERE date = '2026-05-29'
+  AND (strategy_id, strategy_name) IN
+      ((1, 'cot_contrarian_extreme'),
+       (2, 'cl_cot_trend'),
+       (3, 'gc_cot_contrarian_inverse'));
+```
+
+Related: `strategy_backtests` rows id=2 and id=3 carry byte-identical
+metrics (copy artifact from the same recovery incident) — the legacy table
+should receive no new writes.
+
+- [x] Semantic signal writer identified (dead one-off, no active misuse)
+- [ ] 3 junk rows deleted (operator)
+
+### 5. OOS stats data-quality observations (post-sync, 2026-07-17)
+The re-pointed sync populated 31 registry rows with real OOS stats. Two
+things the numbers themselves now show:
+1. **`pead_short_negative_surprise` tops the leaderboard with Sharpe 17.65,
+   win rate 100%, max DD 0 — on 3 trades.** Statistically meaningless, and
+   the frontend ranks by it. `strategy_backtest_runs` already computes
+   `passed_trade_count` (>30) and `all_risk_gates_passed`; the tier/
+   priority display (and any capital decision) should gate on those rather
+   than raw Sharpe. Recommendation: expose `trade_count_oos` gates in the
+   frontend ranking, or add a `gates_passed` flag to the registry sync —
+   do NOT silently filter the data itself.
+2. **`max_drawdown_oos` sign convention is now mixed in the registry**:
+   synced rows store positive magnitudes (ABS(), the table's existing
+   convention), but three pre-existing COMM_* rows carry NEGATIVE values
+   with NULL win rates — written by an earlier handoff outside the sync
+   (they have no backtest_runs rows, yet have stats). Normalize the sign
+   (`UPDATE ... SET max_drawdown_oos = ABS(max_drawdown_oos) WHERE
+   max_drawdown_oos < 0`) or re-deliver those strategies' runs properly
+   via qr_research.
+
+- [ ] Frontend/conviction gating on trade_count_oos decided
+- [ ] COMM_* sign convention normalized or runs re-delivered
 
 
 ---
