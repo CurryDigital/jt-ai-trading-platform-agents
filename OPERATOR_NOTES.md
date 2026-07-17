@@ -70,7 +70,7 @@ metrics (copy artifact from the same recovery incident) — the legacy table
 should receive no new writes.
 
 - [x] Semantic signal writer identified (dead one-off, no active misuse)
-- [ ] 3 junk rows deleted (operator)
+- [x] 3 junk rows deleted (operator, 2026-07-17 — verified: 0 colliding rows remain, only signal-agent names on ids 1/2/3)
 
 ### 5. OOS stats data-quality observations (post-sync, 2026-07-17)
 The re-pointed sync populated 31 registry rows with real OOS stats. Two
