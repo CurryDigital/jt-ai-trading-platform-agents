@@ -12,7 +12,11 @@ Export:
     build_macro_calendar(conn) -> None
 """
 import sys, os
-sys.path.insert(0, 'shared/scripts')
+# CWD-independent (this file moved bronze/macro/ -> silver/ 2026-07-10;
+# it always wrote silver.macro_event_calendar, so silver/ is its home)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SHARED = os.path.normpath(os.path.join(_HERE, '..', 'shared', 'scripts'))
+if _SHARED not in sys.path: sys.path.insert(0, _SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 from datetime import date, timedelta

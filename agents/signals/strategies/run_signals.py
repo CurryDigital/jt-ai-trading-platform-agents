@@ -6,12 +6,12 @@ Loads the strategy registry, instantiates every enabled strategy, calls
 run() + save(), and prints a summary table.
 
 2026-06-22: refactored to read strategies/registry.json instead of
-hardcoding `from strategies.trend.strategy_01 import Strategy01` for
+hardcoding `from strategies.experimental.strategy_01 import Strategy01` for
 20 classes. Adding a new strategy now requires no edits to this file.
 
 To onboard a new strategy:
   python3 strategies/register_strategy.py --id 21 --name "..." --regime TREND --asset-class equity
-Then implement strategies/trend/strategy_21.py::Strategy21 and flip
+Then implement strategies/experimental/strategy_21.py::Strategy21 and flip
 `enabled: true` in registry.json. The next cron picks it up.
 """
 

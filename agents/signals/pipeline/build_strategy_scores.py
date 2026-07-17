@@ -24,7 +24,11 @@ strategy meant editing this file's SQL by hand. prev_macd_histogram (not
 a real column) is resolved via a second-latest-row-per-ticker CTE.
 """
 import sys, os, json
-sys.path.insert(0, 'shared/scripts')
+# Signal-agent layout: agents/signals/pipeline/<this file>;
+# canonical DB pool lives in agents/etl/shared/scripts/db.py.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ETL_SHARED = os.path.normpath(os.path.join(_HERE, '..', '..', 'etl', 'shared', 'scripts'))
+if _ETL_SHARED not in sys.path: sys.path.insert(0, _ETL_SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
@@ -140,31 +144,11 @@ WHERE sc.criterion_name NOT IN (
 AND sc.criterion_name NOT IN %(synthetic)s;
 """
 
-# NOT FIXED — flagged, not guessed: gold.strategy_backtests.strategy_id is
-# smallint (the agents/signals/ registry.json numeric id space, 1-20),
-# while gold.strategy_registry.strategy_id is varchar (semantic ids like
-# "btc_funding_mean_rev_short"). ::varchar cast never bridges these two id
-# spaces, so this UPDATE matches 0 rows against real data today. Needs an
-# operator decision on which id space gold.strategy_backtests should key
-# on before this can be fixed — not something to guess-map silently.
-SQL_REGISTRY_SYNC = """
-UPDATE gold.strategy_registry sr
-SET
-  win_rate_oos  = b.win_rate,
-  sharpe_oos    = b.sharpe,
-  max_drawdown_oos = ABS(b.max_dd),
-  updated_at    = NOW()
-FROM (
-  SELECT DISTINCT ON (strategy_id)
-    strategy_id,
-    win_rate,
-    sharpe,
-    max_dd
-  FROM gold.strategy_backtests
-  ORDER BY strategy_id, run_date DESC
-) b
-WHERE sr.strategy_id = b.strategy_id::varchar;
-"""
+# 2026-07-10: SQL_REGISTRY_SYNC removed from this script. It was a second
+# copy of the backtest→registry OOS sync that update_strategy_registry.py
+# owns (and which now uses the migration-006 registry_strategy_id bridge —
+# the old cast join here matched 0 rows against real data). Both run in the
+# same signal cycle; one owner, one implementation.
 
 def run():
     conn = get_connection()
@@ -187,9 +171,6 @@ def run():
 
     cur.execute(SQL_SCORES)
     print(f"✅ gold.strategy_ticker_scores updated: {cur.rowcount} rows upserted")
-
-    cur.execute(SQL_REGISTRY_SYNC)
-    print(f"✅ gold.strategy_registry synced: {cur.rowcount} rows updated")
 
     conn.commit()
     conn.close()

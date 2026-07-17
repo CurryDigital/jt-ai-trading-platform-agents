@@ -77,7 +77,7 @@ print(get_active_strategies())
 
 ```
 Stage 1 — INGEST (bronze)
-  ├── yfinance/ingest_yfinance.py
+  ├── yfinance/ingest_yfinance_prices.py
   ├── yfinance/ingest_vix.py
   ├── binance/ingest_binance.py
   ├── binance/ingest_funding_rates.py
@@ -128,7 +128,7 @@ etl/
 │   ├── train_hmm.py          ← HMM trainer
 │   ├── regime_rules.py       ← Rule engine + strategy router
 │   └── hmm_model.pkl         ← Serialized model
-├── bronze/macro/
+├── silver/build_macro_event_calendar.py
 │   └── ingest_macro_calendar.py  ← Actual release dates
 ├── tests/
 │   └── test_regime.py        ← 9 pytest cases

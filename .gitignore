@@ -57,3 +57,4 @@ build/
 
 # Ignore OS files
 Thumbs.db
+agents/etl/consumption/pipeline/pipeline_feed.json

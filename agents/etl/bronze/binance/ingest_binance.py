@@ -211,9 +211,20 @@ def _check_row_error_rate():
 
 
 if __name__ == '__main__':
+    # 2026-07-10: absorbed shared/scripts/ingest_binance_crypto.py (a second
+    # OHLCV writer for bronze.binance_crypto_ohlcv living in the shared lib
+    # folder). Same CLI contract: optional interval arg (e.g. '1d' or '1h'),
+    # optional lookback days. No args = DEFAULT_INTERVALS. Funding rates are
+    # ingested only on the daily pass — they publish every 8h, so an hourly
+    # re-pull is pure API noise.
+    import sys as _sys
+    _interval = _sys.argv[1] if len(_sys.argv) > 1 else None
+    _lookback = int(_sys.argv[2]) if len(_sys.argv) > 2 else (2 if _interval == '1h' else 14)
     try:
-        ingest_ohlcv()
-        ingest_funding_rates()
+        ingest_ohlcv(intervals=[_interval] if _interval else None,
+                     days_back=_lookback)
+        if _interval in (None, '1d'):
+            ingest_funding_rates()
         _check_row_error_rate()
         _mark_freshness()
     except Exception as e:

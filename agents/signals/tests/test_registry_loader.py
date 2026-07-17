@@ -44,14 +44,62 @@ def test_real_registry_loads_clean():
 
 
 def test_real_registry_has_expected_real_strategies():
-    """The 7 real (non-stub) strategies must all be enabled."""
+    """The 7 real strategies must all be enabled (stub entries were removed
+    2026-07-10; their ids are in retired_ids)."""
     enabled = load_enabled_strategies()
     enabled_ids = sorted(e.id for e in enabled)
     expected_real = [1, 2, 6, 11, 15, 16, 18]
     assert enabled_ids == expected_real, (
-        f"expected {expected_real}, got {enabled_ids}. "
-        "Either a real strategy was disabled OR a stub was enabled."
+        f"expected {expected_real}, got {enabled_ids}."
     )
+
+
+def test_real_registry_tiers_match_folders():
+    """Every entry's tier must match the folder its class_path points into."""
+    for e in load_registry():
+        module = e.class_path.partition(":")[0]
+        assert module.startswith(f"strategies.{e.tier}."), (
+            f"id={e.id}: tier={e.tier!r} but module {module!r}"
+        )
+
+
+def test_retired_id_rejected():
+    """Re-using a retired id must raise, even if otherwise valid."""
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
+    json.dump({
+        "schema_version": 2,
+        "retired_ids": [12],
+        "strategies": [
+            {"id": 12, "name": "necromancer", "class_path": "x:Y",
+             "regime": "TREND", "enabled": False, "asset_class": "equity"},
+        ],
+    }, tmp)
+    tmp.close()
+    try:
+        load_registry(tmp.name)
+    except RegistryError as e:
+        assert "retired" in str(e)
+        return
+    finally:
+        os.unlink(tmp.name)
+    raise AssertionError("expected RegistryError on retired id re-use")
+
+
+def test_tier_folder_mismatch_rejected():
+    """A strategies.* class_path whose folder contradicts tier must raise."""
+    path = _write_tmp_registry([
+        {"id": 99, "name": "liar", "tier": "golden",
+         "class_path": "strategies.experimental.strategy_99:Strategy99",
+         "regime": "TREND", "enabled": False, "asset_class": "equity"},
+    ])
+    try:
+        load_registry(path)
+    except RegistryError as e:
+        assert "golden" in str(e)
+        return
+    finally:
+        os.unlink(path)
+    raise AssertionError("expected RegistryError on tier/folder mismatch")
 
 
 def test_strategy_map_contains_only_enabled():
