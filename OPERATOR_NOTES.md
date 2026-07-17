@@ -45,6 +45,24 @@ operator decision, not a cleanup side effect.
 
 - [ ] `DROP TABLE gold.stock_metrics` (or document a reason to keep it)
 
+### 4. `gold.strategy_signals` id-space collision (found 2026-07-17)
+The diagnostic showed two DIFFERENT strategies sharing the same smallint
+`strategy_id` in `gold.strategy_signals`: id=1 has rows named both
+'Dual EMA crossover' (signal agent) AND 'cot_contrarian_extreme' (semantic
+strategy); same for id=2 ('52-week high momentum' / 'cl_cot_trend') and
+id=3 ('RSI(2) mean reversion' / 'gc_cot_contrarian_inverse'). Something —
+likely a qr_research writer — inserted semantic strategies' signals using
+numeric ids that collide with the signal agent's id space. Since the PK is
+`(date, strategy_id)`, a same-day write from both silently overwrites one
+of them. Find the semantic writer, stop it using this table (or give it
+its own semantic-keyed signals table), and treat the 3 colliding history
+rows as suspect. Related: `strategy_backtests` rows id=2 and id=3 carry
+byte-identical metrics — a copy artifact, further evidence this legacy
+table shouldn't receive new writes.
+
+- [ ] Semantic signal writer identified and moved off gold.strategy_signals
+
+
 ---
 
 ## 🔭 Optimization backlog (from the 2026-07-10 full etl+signals review)
@@ -63,7 +81,7 @@ would have caught both:
   run_consumption/run_pipeline_step` in the refresh shells and asserts the
   file exists and its extension matches the runner.
 
-### P0-2. Unify the three strategy-id spaces 🟡 PLUMBING DONE 2026-07-10 (migration 006 bridge column + sync rewrite) — **operator must backfill the numeric→semantic mapping**, see migration header
+### P0-2. Unify the three strategy-id spaces ✅ RESOLVED 2026-07-17 — diagnostic proved NO mapping exists: smallint ids 1/2/3 in strategy_backtests are signal-agent artifacts (1=Dual EMA, 2=52wk-high, 3=RSI(2), confirmed via strategy_signals.strategy_name + registry.json); registry_strategy_id stays NULL by design. Real OOS runs live in `gold.strategy_backtest_runs` (semantic-keyed, 59 strategies) and `update_strategy_registry.py` now syncs from there. The 006 bridge remains for any future operator-mapped legacy row.
 `registry.json` uses numeric ids (1–20), `gold.strategy_registry` uses
 semantic varchar ids (`btc_funding_mean_rev_short`), and
 `gold.strategy_backtests` uses smallint ids. Consequences observed live:
