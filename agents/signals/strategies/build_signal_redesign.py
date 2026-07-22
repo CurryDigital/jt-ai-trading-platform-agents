@@ -78,6 +78,7 @@ STRATEGY_KEYWORD_TO_FAMILY = [
     ('seasonal',    'Seasonal SUE'),
     ('btc',         'momentum'),
     ('crypto',      'momentum'),
+    ('HK_Quality',  'hk_paper_v1'),
 ]
 
 

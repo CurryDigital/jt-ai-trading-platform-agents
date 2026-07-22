@@ -100,13 +100,14 @@ SQL_OPPORTUNITIES = """
 DELETE FROM consumption.dashboard_opportunities_top;
 
 INSERT INTO consumption.dashboard_opportunities_top
-  (rank, ticker, name, asset_class, signal_type, direction, confidence,
+  (rank, ticker, name, asset_class, strategy_id, signal_type, direction, confidence,
    expected_return_pct, entry_price, stop_loss, take_profit, rationale, updated_at)
 SELECT
   ROW_NUMBER() OVER (ORDER BY sts.score DESC) AS rank,
   sts.ticker,
   ar.name,
   ar.asset_class,
+  sts.strategy_id AS strategy_id,
   sr.strategy_id AS signal_type,
   'LONG' AS direction,
   sts.score / 100 AS confidence,

@@ -1,0 +1,5 @@
+# Ignore generated artifact data files; keep source scripts
+*.csv
+*.json
+*.txt
+*.log

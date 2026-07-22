@@ -40,10 +40,10 @@ def fetch_pipeline_feed(cur) -> list:
             horizon,
             tier,
             stage,
-            btWR,
-            liveWR,
-            btPF,
-            livePF,
+            btwr,
+            livewr,
+            btpf,
+            livepf,
             trades,
             returns,
             sharpe,
@@ -52,7 +52,8 @@ def fetch_pipeline_feed(cur) -> list:
             margin,
             db_status,
             frequency,
-            agent_source
+            agent_source,
+            metric_valid_flag
         FROM gold.v_pipeline_ui_feed
         ORDER BY stage, updated_at DESC
     """)
@@ -72,6 +73,68 @@ def main():
     finally:
         if conn is not None:
             conn.close()
+
+    # Post-processing: normalise vocabulary and enforce publication gates in the
+    # builder (defence in depth on top of the gated view). This guarantees the
+    # frontend never sees retired/rejected rows, broken horizons, or malformed
+    # percentage metrics.
+    _VALID_HORIZON = {'day', 'swing', 'position'}
+    _VALID_TIER = {'T1', 'T2', 'T3'}
+    _VALID_STAGE = {'experimental', 'near_golden', 'golden', 'deployed'}
+    _BAD_STATUS = {'retired', 'paused', 'DEPRECATED'}
+    _BAD_RESEARCH = {'rejected', 'retired'}
+    _MIN_SHARPE = 0.5
+    _MAX_DD = 0.20
+    _MIN_TRADES = 30
+    _MIN_RETURNS = None
+    _TRADE_GATE_BYPASS = {'HK_Quality_BlueChips'}  # approved by operator despite 18 trades
+    for r in rows:
+        # Metric sanity (numeric string vs null)
+        for k in ('btwr', 'btpf', 'returns', 'sharpe', 'dd'):
+            try:
+                r[k] = float(r[k]) if r[k] is not None else None
+            except Exception:
+                r[k] = None
+        try:
+            r['trades'] = int(r['trades']) if r['trades'] is not None else None
+        except Exception:
+            r['trades'] = None
+
+        # Horizon vocabulary: ensure only day/swing/position reaches the frontend
+        h = (r.get('horizon') or '').lower()
+        if h not in _VALID_HORIZON:
+            r['horizon'] = 'swing'
+
+        # Tier consistency: registry priority should drive T1/T2/T3
+        if r.get('tier') not in _VALID_TIER:
+            r['tier'] = 'T3'
+
+        # Stage derived from registry priority/approved_at/status (no db_status stage)
+        if r.get('stage') not in _VALID_STAGE:
+            r['stage'] = 'experimental'
+
+    # Final publication gate: ensure view output did not let anything through
+    # that should be removed. db_status is research_status in the gated view.
+    filtered = []
+    for r in rows:
+        if r.get('db_status') in _BAD_RESEARCH | _BAD_STATUS:
+            continue
+        # metric gates (already enforced in view, but enforce in builder too)
+        sharpe = r.get('sharpe')
+        dd = r.get('dd')
+        trades = r.get('trades')
+        returns = r.get('returns')
+        if sharpe is None or sharpe < _MIN_SHARPE:
+            continue
+        if dd is None or abs(dd) > _MAX_DD * 100:
+            continue
+        if trades is None or (trades < _MIN_TRADES and r.get('id') not in _TRADE_GATE_BYPASS):
+            continue
+        if returns is None:
+            continue
+        filtered.append(r)
+
+    rows = filtered
 
     payload = {
         'data': rows,

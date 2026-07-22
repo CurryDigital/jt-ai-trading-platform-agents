@@ -308,6 +308,7 @@ run_gold "Market news" "gold/market/build_market_news.py"
 run_gold "IB gateway state" "gold/market/build_ib_gateway_state.py"
 run_gold "Risk limits" "gold/market/build_risk_limits.py"
 run_gold "Attention items" "gold/strategy/build_attention_items.py"
+run_gold "Strategy annual backtest returns" "gold/strategy/refresh_annual_backtest_returns.py"
 run_gold "Account NAV daily" "gold/portfolio/build_account_nav_daily.py"
 run_gold "Manual positions fold-in" "gold/portfolio/build_manual_positions.py"
 

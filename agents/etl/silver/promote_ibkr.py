@@ -95,12 +95,13 @@ def promote_ibkr_positions():
                 INSERT INTO silver.unified_prices
                     (ticker, date, open, high, low, close, volume, source, adjusted_close, created_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (ticker, date, source) DO UPDATE SET
+                ON CONFLICT (ticker, date) DO UPDATE SET
                     open = EXCLUDED.open,
                     high = EXCLUDED.high,
                     low = EXCLUDED.low,
                     close = EXCLUDED.close,
                     volume = EXCLUDED.volume,
+                    source = EXCLUDED.source,
                     adjusted_close = EXCLUDED.adjusted_close
             """, (
                 ticker,

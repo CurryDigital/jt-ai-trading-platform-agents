@@ -180,8 +180,10 @@ ON CONFLICT (ticker) DO UPDATE SET
 DASHBOARD_OVERVIEW_SQL = """
 INSERT INTO consumption.dashboard_market_overview
     (region, index_name, index_ticker,
-     current_value, change_pct, change_value, trend,
-     sentiment_score, volatility_index, spark, updated_at)
+     current_value, change_pct, change_value, change_1d, change_1w, change_1m, change_ytd,
+     trend, sentiment_score, volatility_index,
+     est_1d, est_1w, est_1m,
+     spark, updated_at)
 SELECT
     r.region,
     im.name   AS index_name,
@@ -189,6 +191,27 @@ SELECT
     im.close  AS current_value,
     im.change_pct,
     im.change_amount AS change_value,
+    ROUND((im.change_pct)::numeric, 3)                                  AS change_1d,
+    ROUND((im.returns_5d  * 100)::numeric, 3)                           AS change_1w,
+    -- 21-day (monthly) return: use gold.index_metrics.returns_21d if present,
+    -- else fall back to close / 21-trading-day lag over the same table so HK
+    -- holiday gaps don't leave the field NULL.
+    COALESCE(
+        ROUND((im.returns_21d * 100)::numeric, 3),
+        ROUND(((im.close / NULLIF(
+            (SELECT close FROM gold.index_metrics i2
+             WHERE i2.ticker = im.ticker AND i2.date <= im.date - INTERVAL '21 days'
+             ORDER BY i2.date DESC LIMIT 1), 0) - 1) * 100)::numeric, 3)
+    ) AS change_1m,
+    -- 252-day (YTD) return: prefer returns_252d, else fall back to the
+    -- latest close at least one year ago in the same series.
+    COALESCE(
+        ROUND((im.returns_252d * 100)::numeric, 3),
+        ROUND(((im.close / NULLIF(
+            (SELECT close FROM gold.index_metrics i2
+             WHERE i2.ticker = im.ticker AND i2.date <= im.date - INTERVAL '252 days'
+             ORDER BY i2.date DESC LIMIT 1), 0) - 1) * 100)::numeric, 3)
+    ) AS change_ytd,
     CASE
         WHEN im.above_ma_200 AND im.change_pct > 0 THEN 'BULL'
         WHEN NOT im.above_ma_200 THEN 'BEAR'
@@ -196,6 +219,21 @@ SELECT
     END AS trend,
     NULL::numeric AS sentiment_score,
     NULL::numeric AS volatility_index,
+    CASE
+        WHEN im.change_pct > 0.5 THEN 'BULLISH'
+        WHEN im.change_pct < -0.5 THEN 'BEARISH'
+        ELSE 'NEUTRAL'
+    END AS est_1d,
+    CASE
+        WHEN im.above_ma_50 AND im.change_pct > 0 THEN 'BULLISH'
+        WHEN NOT im.above_ma_50 THEN 'BEARISH'
+        ELSE 'NEUTRAL'
+    END AS est_1w,
+    CASE
+        WHEN im.above_ma_200 AND im.change_pct > 0 THEN 'BULLISH'
+        WHEN NOT im.above_ma_200 THEN 'BEARISH'
+        ELSE 'NEUTRAL'
+    END AS est_1m,
     spark.values AS spark,
     NOW()
 FROM (
@@ -220,7 +258,14 @@ WHERE im.is_volatility_index = FALSE
 ON CONFLICT (region, index_ticker) DO UPDATE SET
     current_value  = EXCLUDED.current_value,
     change_pct     = EXCLUDED.change_pct,
+    change_1d      = EXCLUDED.change_1d,
+    change_1w      = EXCLUDED.change_1w,
+    change_1m      = EXCLUDED.change_1m,
+    change_ytd     = EXCLUDED.change_ytd,
     trend          = EXCLUDED.trend,
+    est_1d         = EXCLUDED.est_1d,
+    est_1w         = EXCLUDED.est_1w,
+    est_1m         = EXCLUDED.est_1m,
     spark          = EXCLUDED.spark,
     updated_at     = NOW();
 """
@@ -280,26 +325,22 @@ SELECT
     sts.ticker,
     ar.name,
     ar.asset_class,
-    sd.strategy_id AS signal_type,
+    sr.strategy_id AS signal_type,
     sts.signal_action AS direction,
     ROUND(LEAST(sts.score / 100.0, 1.0), 3) AS confidence,
-    ROUND(sb.avg_trade_return * 100, 4) AS expected_return_pct,
+    ROUND(sr.sharpe_oos, 4) AS expected_return_pct,
     k.close AS entry_price,
     NULL::numeric AS stop_loss,
     NULL::numeric AS take_profit,
-    sd.name AS rationale,
+    sr.name AS rationale,
     NOW()
 FROM gold.strategy_ticker_scores sts
 LEFT JOIN gold.asset_registry ar ON ar.ticker = sts.ticker
-LEFT JOIN gold.strategy_definitions sd ON sd.strategy_id = sts.strategy_id
+LEFT JOIN gold.strategy_registry sr ON sr.strategy_id = sts.strategy_id
 LEFT JOIN (
     SELECT DISTINCT ON (ticker) ticker, close
     FROM gold.kpis_metrics ORDER BY ticker, date DESC
 ) k ON k.ticker = sts.ticker
-LEFT JOIN (
-    SELECT DISTINCT ON (strategy_id) strategy_id, avg_trade_return
-    FROM gold.strategy_backtests ORDER BY strategy_id, calculated_at DESC
-) sb ON sb.strategy_id = sts.strategy_id
 WHERE sts.signal_action = 'BUY'
 ORDER BY sts.score DESC
 LIMIT 10;
