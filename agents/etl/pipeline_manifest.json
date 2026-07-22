@@ -463,14 +463,6 @@
       "enabled": true
     },
     {
-      "name": "Pipeline UI feed",
-      "script": "consumption/pipeline/build_pipeline_feed.py",
-      "stage": "consumption",
-      "cadence": "daily",
-      "timeout": 30,
-      "enabled": true
-    },
-    {
       "name": "Binance crypto (hourly)",
       "script": "bronze/binance/ingest_binance.py",
       "stage": "bronze",

@@ -34,6 +34,19 @@ ssh step — the runner covers python/sql steps only).
 
 - [ ] daily/hourly cron cut over to run_stage.py after server dry-run
 
+### 1c. build_pipeline_feed.py is not run by any repo refresh shell
+The dry-run gate (2026-07-22) caught that consumption/pipeline/build_pipeline_
+feed.py — which reads gold.v_pipeline_ui_feed and writes the frontend Pipeline
+UI's pipeline_feed.json — is NOT in daily_refresh.sh's consumption sweep
+(command lab performance portfolio market — no 'pipeline') and not in any
+other repo shell. It was wrongly added to the daily manifest; removed to keep
+the cutover behavior-preserving. Open question: does the server-side
+pipeline_b_signals.sh (outside repo) run it? If NOTHING runs it, the frontend
+Pipeline feed is stale and it should be added back to the daily manifest as a
+deliberate one-line change (it's a genuine gap, just not part of the cutover).
+
+- [ ] Confirm whether build_pipeline_feed.py runs anywhere; if not, add to daily manifest
+
 ---
 
 ## 🚩 Flagged, deliberately not fixed
