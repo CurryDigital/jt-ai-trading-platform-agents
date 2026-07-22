@@ -138,8 +138,14 @@ PIPELINE_FAILURES=()
 #    → gold.strategy_ticker_scores
 run_pipeline_step "Strategy scores" "pipeline/build_strategy_scores.py"
 
-# HK Quality BlueChips paper-strategy signal ingestion (ETL-side, task t_259b9936)
-run_pipeline_step "HK Quality BlueChips signal" "${SIGNALS_DIR}/../etl/gold/strategy/ingest_hk_quality_bluechips_t_259b9936.py"
+# Paper-strategy signal ingestion — ONE recurring scan of the qr_research
+# signal directory. Replaces the per-strategy / per-batch ingest scripts
+# (ingest_hk_quality_bluechips_t_259b9936.py, ingest_hk_batch_*, etc., now
+# quarantined). Resolves strategy_id by name from the registry; unknown
+# names are reported and skipped, never invented. Override the directory
+# with QR_RESEARCH_SIGNAL_DIR.
+QR_SIGNAL_DIR="${QR_RESEARCH_SIGNAL_DIR:-/home/ubuntu/.hermes/profiles/qr_research/workspace}"
+run_pipeline_step "Paper-signal ingest (all)" "pipeline/ingest_paper_signal.py" --signal-dir "${QR_SIGNAL_DIR}"
 
 # 2. S9 MACD daily signal generation
 run_pipeline_step "S9 MACD signals" "pipeline/s9_macd_daily.py"

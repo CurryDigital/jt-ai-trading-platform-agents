@@ -20,6 +20,20 @@ strategy entries). Details: `agents/signals/pipeline/README.md`.
 
 - [ ] pipeline_b_signals.sh updated on server
 
+### 1b. Cut daily/hourly refresh over to run_stage.py (P1-5)
+The manifest engine is built, tested, and proven to enumerate EXACTLY the
+scripts daily_refresh.sh runs today (equivalence diff: 0 difference, 55
+scripts; the only change is deduping idempotent double-runs — resolves
+flag 2). weekly_refresh.sh already delegates. Before flipping the daily/
+hourly production cron, run ON THE SERVER:
+    cd .../agents/etl && python3 run_stage.py --cadence daily --dry-run
+compare the printed plan to a recent daily_refresh.sh log, then replace the
+daily/hourly shell stage-bodies with `python3 run_stage.py --cadence <c>
+--state-out .state.json` (keep the env/venv/PATH preamble and the IBKR EC2
+ssh step — the runner covers python/sql steps only).
+
+- [ ] daily/hourly cron cut over to run_stage.py after server dry-run
+
 ---
 
 ## 🚩 Flagged, deliberately not fixed
@@ -70,7 +84,7 @@ metrics (copy artifact from the same recovery incident) — the legacy table
 should receive no new writes.
 
 - [x] Semantic signal writer identified (dead one-off, no active misuse)
-- [ ] 3 junk rows deleted (operator)
+- [x] 3 junk rows deleted (operator, 2026-07-17 — verified: 0 colliding rows remain, only signal-agent names on ids 1/2/3)
 
 ### 5. OOS stats data-quality observations (post-sync, 2026-07-17)
 The re-pointed sync populated 31 registry rows with real OOS stats. Two
@@ -94,6 +108,38 @@ things the numbers themselves now show:
 
 - [ ] Frontend/conviction gating on trade_count_oos decided
 - [ ] COMM_* sign convention normalized or runs re-delivered
+
+### 6. 2026-07-22 upload: fabricated/laundered metrics in prod (found in review)
+Three scripts from the 2026-07-22 drop (now quarantined in
+`workspace/oneoff/`, see its README) already ran against prod:
+1. **Estimated profit factors in the measured column.** `estimate_missing_
+   backtest_pf.py` wrote heuristic PF (`1 + return/|dd|`, sentinel 999)
+   into `strategy_backtest_runs.profit_factor_oos`, which
+   `v_pipeline_ui_feed` serves as "BT PF". Revert:
+   `UPDATE gold.strategy_backtest_runs SET profit_factor_oos = NULL
+    WHERE notes LIKE '%estimated_return_drawdown%';`
+2. **Reverse-synced backtest rows.** `backfill_etf_win_rate_oos.py`
+   rewrote 8 ETF strategies' latest backtest rows to match registry values
+   — runs→registry provenance destroyed for those rows; treat their
+   win_rate_oos as unverifiable until qr_research re-delivers.
+3. **Synthetic trades in the real ledger.** `backfill_strategy_live_data.py`
+   wrote synthetic PAPER fills into `gold.trade_executions` (read by
+   execution_fills + detail-page Trades). Quantify:
+   `SELECT COUNT(*) FROM gold.trade_executions te
+    WHERE EXISTS (SELECT 1 FROM gold.strategy_registry sr
+                  WHERE sr.strategy_id = te.strategy_id
+                    AND sr.execution_mode = 'PAPER');`
+   Decide: move them to paper_trades_synthetic, or add a source column
+   ('real'|'synthetic') and make consumption views filter.
+
+- [ ] Estimated PFs reverted on prod
+- [ ] Reverse-synced ETF backtest rows flagged to qr_research
+- [ ] trade_executions synthetic rows separated or labeled
+       → migration 009 adds gold.trade_executions.execution_source with an
+         evidence-based backfill (paper/sim fills lacking an ibkr_order_id →
+         'synthetic') + consumption.execution_fills_real (real fills only).
+         Apply 009, verify the printed synthetic count, then point the
+         detail page's Live WR/P&L at execution_fills_real.
 
 
 ---
@@ -140,7 +186,7 @@ iterate DataFrames calling `cur.execute` per row — 10k+ round trips per
 daily run. `psycopg2.extras.execute_values` is a drop-in ~10–50× speedup
 and directly shrinks the daily window in which timeouts fire.
 
-### P1-5. Replace glob-sweeps with an explicit manifest
+### P1-5. Replace glob-sweeps with an explicit manifest 🟡 ENGINE DONE 2026-07-22 (`agents/etl/pipeline_manifest.json` + `run_stage.py` + CI validation; weekly_refresh.sh converted; daily/hourly shell cutover gated on a server dry-run — see below)
 `for f in bronze/yfinance/*.py` is how the double-Yahoo-ingest happened,
 how `ingest_yfinance_aux` got swept into a 120s timeout, and why the
 `# CADENCE: weekly` marker hack exists. One manifest (per stage: script,
@@ -148,7 +194,7 @@ cadence, timeout, enabled) + one runner would replace the duplicated
 `run_*` functions across daily/hourly/weekly shells and make "what runs
 when" reviewable in a single diff.
 
-### P1-6. Standardize freshness marking 🟡 STARTED 2026-07-10 (`freshness_guard` context manager added to shared/scripts/freshness.py; ingest_yfinance_prices.py converted as the reference — remaining scripts to migrate opportunistically)
+### P1-6. Standardize freshness marking ✅ DONE 2026-07-22 — `freshness_guard` context manager (shared/scripts/freshness.py) + run_stage.py now stamps gold.source_freshness for EVERY manifest step whose script doesn't already self-stamp (38 previously-blind silver/gold/consumption/VIX steps now covered; 17 self-stampers keep their own source names). Complete-by-construction: any new manifest step gets freshness for free. Requires the daily/hourly cron cutover to run_stage.py (flag 1b) to take effect on the recurring path.
 `gold.source_freshness` coverage is opt-in per script — some mark, some
 don't (ingest_yfinance_prices.py only gained it in this review). Wrap it
 once in `shared/scripts` (context manager or decorator) and require it via

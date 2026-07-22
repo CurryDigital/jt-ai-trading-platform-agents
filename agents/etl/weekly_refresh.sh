@@ -62,53 +62,16 @@ echo "✅ Hermes venv check: psycopg2 + dotenv importable"
 
 cd "${WORKSPACE}"
 
-FAILED=()
-OK=()
-
-# Generous timeout: docstrings for weekly-cadence jobs typically estimate
-# 10-15 minutes for a full ticker universe. 1800s (30 min) gives headroom;
-# -k 30s force-kills if a script hangs past that regardless of signal
-# cooperation (same hardening applied to daily_refresh.sh's timeouts).
-WEEKLY_TIMEOUT=1800
-
-run_weekly() {
-    local name="$1"
-    local script="$2"
-    echo "→ ${name} (budget ${WEEKLY_TIMEOUT}s)..."
-    local start_ts=$(date +%s)
-    if timeout -k 30s ${WEEKLY_TIMEOUT}s "${PYTHON}" "${script}"; then
-        local elapsed=$(( $(date +%s) - start_ts ))
-        echo "  ✅ ${name} complete (${elapsed}s)"
-        OK+=("${name}")
-    else
-        local exit_code=$?
-        local elapsed=$(( $(date +%s) - start_ts ))
-        if [ $exit_code -eq 124 ]; then
-            echo "  ⏱️ ${name} TIMEOUT after ${elapsed}s (budget ${WEEKLY_TIMEOUT}s)"
-        else
-            echo "  ⚠️ ${name} FAILED (exit $exit_code, ${elapsed}s)"
-        fi
-        FAILED+=("${name}")
-    fi
-}
-
-echo ""
-echo "🔶 WEEKLY — scanning bronze/silver/gold for '# CADENCE: weekly' tag"
-echo "------------------------------------------"
-
-# Recursive scan across all three layers — future-proof for any weekly
-# script added outside bronze/yfinance/.
-while IFS= read -r -d '' f; do
-    if grep -q '# CADENCE: weekly' "$f" 2>/dev/null; then
-        rel="${f#${WORKSPACE}/}"
-        run_weekly "$rel" "$f"
-    fi
-done < <(find "${WORKSPACE}/bronze" "${WORKSPACE}/silver" "${WORKSPACE}/gold" -name "*.py" -print0 2>/dev/null)
-
-if [ ${#FAILED[@]} -gt 0 ]; then
-    echo "⚠️ Weekly failures: ${FAILED[*]}"
-fi
-echo "✅ Weekly complete (${#OK[@]} ok, ${#FAILED[@]} failed)"
+# 2026-07-22: weekly steps are now declared in pipeline_manifest.json
+# (cadence: "weekly") and executed by run_stage.py — the same runner the
+# daily/hourly stages use. This replaced the '# CADENCE: weekly' comment
+# scan: a step's cadence is data in the manifest, not a marker grepped out
+# of source files. Adding a weekly job = one manifest entry, reviewable in
+# one diff. The runner applies each step's own timeout (aux = 1800s) and a
+# +10s SIGKILL grace, and returns non-zero on any failure.
+export PYTHON
+"${PYTHON}" run_stage.py --cadence weekly
+RC=$?
 
 echo ""
 echo "=========================================="
@@ -116,4 +79,4 @@ echo "WEEKLY REFRESH COMPLETED: $(date)"
 echo "Log: ${LOG_FILE}"
 echo "=========================================="
 
-exit ${#FAILED[@]}
+exit ${RC}
