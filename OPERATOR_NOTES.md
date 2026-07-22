@@ -34,6 +34,19 @@ ssh step — the runner covers python/sql steps only).
 
 - [ ] daily/hourly cron cut over to run_stage.py after server dry-run
 
+### 1c. build_pipeline_feed.py is not run by any repo refresh shell
+The dry-run gate (2026-07-22) caught that consumption/pipeline/build_pipeline_
+feed.py — which reads gold.v_pipeline_ui_feed and writes the frontend Pipeline
+UI's pipeline_feed.json — is NOT in daily_refresh.sh's consumption sweep
+(command lab performance portfolio market — no 'pipeline') and not in any
+other repo shell. It was wrongly added to the daily manifest; removed to keep
+the cutover behavior-preserving. Open question: does the server-side
+pipeline_b_signals.sh (outside repo) run it? If NOTHING runs it, the frontend
+Pipeline feed is stale and it should be added back to the daily manifest as a
+deliberate one-line change (it's a genuine gap, just not part of the cutover).
+
+- [ ] Confirm whether build_pipeline_feed.py runs anywhere; if not, add to daily manifest
+
 ---
 
 ## 🚩 Flagged, deliberately not fixed
@@ -134,12 +147,21 @@ Three scripts from the 2026-07-22 drop (now quarantined in
 
 - [ ] Estimated PFs reverted on prod
 - [ ] Reverse-synced ETF backtest rows flagged to qr_research
-- [ ] trade_executions synthetic rows separated or labeled
-       → migration 009 adds gold.trade_executions.execution_source with an
-         evidence-based backfill (paper/sim fills lacking an ibkr_order_id →
-         'synthetic') + consumption.execution_fills_real (real fills only).
-         Apply 009, verify the printed synthetic count, then point the
-         detail page's Live WR/P&L at execution_fills_real.
+- [x] trade_executions synthetic rows separated or labeled — RESOLVED 2026-07-22
+       migration 009 applied on prod. VERIFIED: gold.trade_executions is
+       EMPTY (0 rows) — the real ledger was never actually polluted; the
+       synthetic paper trades correctly live in gold.paper_trades_synthetic
+       (98) / s9_paper_trades (105), their proper home. execution_source
+       backfill marked 0 synthetic / 0 real (nothing to label). signal_source
+       backfill worked: 94 ingested / 64 computed. consumption.execution_
+       fills_real correctly returns empty (= honest "no live broker fills
+       yet"). Nothing to move — populating trade_executions from the paper
+       tables would be the anti-pattern.
+       SEPARATE, still open: the detail page's "Live WR 0% over 3 trades"
+       treats OPEN paper_trades_synthetic positions as realized losses.
+       Frontend fix = compute Live WR from consumption.strategies_trades_
+       history WHERE status='closed' (migration 008 exposes status), NOT
+       from execution_fills_real (which stays empty until real fills exist).
 
 
 ---
