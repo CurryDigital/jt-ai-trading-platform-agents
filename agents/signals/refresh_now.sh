@@ -126,8 +126,9 @@ echo "=========================================="
 # Core signal surface, in dependency order.
 step "Strategy scores"        "pipeline/build_strategy_scores.py"
 step "S9 MACD signals"        "pipeline/s9_macd_daily.py"
-HK_INGEST="${SIGNALS_DIR}/../etl/gold/strategy/ingest_hk_quality_bluechips_t_259b9936.py"
-[ -f "${HK_INGEST}" ] && step "HK Quality BlueChips signal" "${HK_INGEST}"
+# One recurring scan of the qr_research signal dir (replaces per-strategy scripts).
+QR_SIGNAL_DIR="${QR_RESEARCH_SIGNAL_DIR:-/home/ubuntu/.hermes/profiles/qr_research/workspace}"
+step "Paper-signal ingest (all)" "pipeline/ingest_paper_signal.py" --signal-dir "${QR_SIGNAL_DIR}"
 
 if [ ${FULL} -eq 1 ]; then
     sql_step "ETF Multi-Asset signal"  "pipeline/build_etf_multi_asset_paper_signal.sql"

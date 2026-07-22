@@ -216,10 +216,35 @@ def ingest_one(conn, strategy_id, strategy_name, asset_class,
                        generated_at, weights)
 
 
+def _ingest_all_from_file(conn, signal_file, asset_class):
+    """Ingest every strategy in one signal file. Returns (n_ok, skipped)."""
+    generated_at, signals = load_signal_file(signal_file)
+    print(f"{now_hkt()} Loaded signal file: {signal_file} (generated {generated_at})")
+    n_ok, skipped = 0, []
+    for name, weights in signals.items():
+        if not weights:
+            skipped.append((name, "empty weights"))
+            continue
+        sid = resolve_strategy_id(conn, name)
+        if sid is None:
+            skipped.append((name, "not in gold.strategy_registry"))
+            continue
+        ingest_one(conn, sid, name, asset_class, signal_file, generated_at, weights)
+        n_ok += 1
+    return n_ok, skipped
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    p.add_argument("--signal-file", required=True,
-                   help="Path to the deployed live-signal JSON")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--signal-file", help="Path to one deployed live-signal JSON")
+    src.add_argument("--signal-dir",
+                     help="Directory of signal files — ingest ALL matching --signal-glob. "
+                          "This is the consistent recurring path: one call replaces "
+                          "the per-strategy/per-batch ingest scripts.")
+    p.add_argument("--signal-glob", default="*live_signals*.json",
+                   help="Filename pattern for --signal-dir (default: '*live_signals*.json'). "
+                        "Keeps backtest/manifest JSONs out of the ingest.")
     p.add_argument("--strategy-id",
                    help="gold.strategy_registry.strategy_id (single-strategy mode)")
     p.add_argument("--strategy-name",
@@ -231,39 +256,46 @@ def main() -> int:
                         "gold.strategy_registry by name, unknown names skipped")
     args = p.parse_args()
 
-    if not args.all and not (args.strategy_id and args.strategy_name):
-        p.error("either --all, or both --strategy-id and --strategy-name")
-
-    generated_at, signals = load_signal_file(args.signal_file)
-    print(f"{now_hkt()} Loaded signal file: {args.signal_file} (generated {generated_at})")
-
     conn = get_connection()
-    skipped = []
+    total_ok, skipped = 0, []
     try:
-        if args.all:
-            for name, weights in signals.items():
-                if not weights:
-                    skipped.append((name, "empty weights"))
-                    continue
-                sid = resolve_strategy_id(conn, name)
-                if sid is None:
-                    skipped.append((name, "not in gold.strategy_registry"))
-                    continue
-                ingest_one(conn, sid, name, args.asset_class,
-                           args.signal_file, generated_at, weights)
+        if args.signal_dir:
+            import glob
+            # The qr_research workspace holds backtest/manifest JSONs too, so
+            # match a signal-file naming pattern rather than every *.json.
+            files = sorted(glob.glob(os.path.join(args.signal_dir, args.signal_glob)))
+            if not files:
+                print(f"{now_hkt()} ⚠️  no files matching {args.signal_glob!r} in {args.signal_dir}")
+                return 1
+            print(f"{now_hkt()} Scanning {len(files)} signal file(s) in {args.signal_dir}")
+            for f in files:
+                # BaseException catch: load_signal_file raises SystemExit on a
+                # non-signal file, which a bare `except Exception` would miss
+                # and let kill the whole scan.
+                try:
+                    n_ok, sk = _ingest_all_from_file(conn, f, args.asset_class)
+                    total_ok += n_ok
+                    skipped.extend(sk)
+                except BaseException as e:
+                    skipped.append((os.path.basename(f), f"file error: {e}"))
+        elif args.all:
+            total_ok, skipped = _ingest_all_from_file(conn, args.signal_file, args.asset_class)
         else:
+            if not (args.strategy_id and args.strategy_name):
+                p.error("single-file mode needs --all, or both --strategy-id and --strategy-name")
+            generated_at, signals = load_signal_file(args.signal_file)
             weights = signals.get(args.strategy_name) or {}
             if not weights:
-                raise SystemExit(
-                    f"No {args.strategy_name!r} signals found in {args.signal_file}"
-                )
+                raise SystemExit(f"No {args.strategy_name!r} signals in {args.signal_file}")
             ingest_one(conn, args.strategy_id, args.strategy_name,
                        args.asset_class, args.signal_file, generated_at, weights)
+            total_ok = 1
     finally:
         conn.close()
 
+    print(f"{now_hkt()} Ingested {total_ok} strategies.")
     if skipped:
-        print(f"{now_hkt()} ⚠️  skipped {len(skipped)} strategies:")
+        print(f"{now_hkt()} ⚠️  skipped {len(skipped)}:")
         for name, why in skipped:
             print(f"    {name}: {why}")
     print(f"{now_hkt()} Signal pipeline ingestion complete.")

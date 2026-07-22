@@ -35,3 +35,25 @@ are kept as the historical record of what was done to prod, NOT as tools.
 
 `tmp-2026-07-22/` is the batch of 20 ad-hoc probe/diagnostic scripts that
 were committed to `agents/etl/tmp/` in the same upload.
+
+## Quarantined 2026-07-22 (batch 2) — bespoke dated onboarding scripts
+
+Signal generation had fractured again: each strategy/batch got its own dated
+ingest script, one of which (`ingest_hk_quality_bluechips_t_259b9936.py`) was
+even wired into the daily cron — re-ingesting a STATIC JSON every day instead
+of computing fresh signals. Replaced by ONE recurring step:
+`ingest_paper_signal.py --signal-dir <qr_research workspace>` scans all
+`*live_signals*.json` files and ingests every strategy found (id resolved by
+name from the registry, unknowns skipped). These already ran to onboard their
+strategies, so they're kept only as history:
+
+| Script | What it onboarded |
+|---|---|
+| `ingest_hk_quality_bluechips_t_259b9936.py` | HK_Quality_BlueChips (was mis-wired as a daily cron step) |
+| `ingest_hk_batch_2_2026-07-18.py` | ETF_HK_Balanced_Trend + 1 more |
+| `ingest_hk_lowvol_batch_2026-07-18.py` | HK low-vol batch |
+| `ingest_us_stock_batch_4_2026-07-18.py` | US stock batch 4 |
+| `ingest_etf_hk_balanced_trend_2026-07-19.py` | ETF_HK_Balanced_Trend refresh |
+| `remediate_approved_pipeline_batch_18_2026-07-17.py` | 18-strategy approved-pipeline remediation |
+| `complete_hk_quality_bluechips_pipeline.py` | one-time publication fix for HK_Quality (OOS trade count below the 30-gate) |
+| `backtest_metrics.py` | DUPLICATE of `agents/signals/pipeline/backtest_metrics.py` with a different API; contained `estimate_profit_factor_from_wr_and_payoff` (fabrication helper). Imported by nothing. The signals-side copy is canonical. |
