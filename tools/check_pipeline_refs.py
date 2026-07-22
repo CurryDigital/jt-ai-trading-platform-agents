@@ -29,21 +29,24 @@ REPO = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 # shell script → the directory its run_* calls resolve paths against
 CHECKED_SHELLS = {
-    "agents/etl/daily_refresh.sh":       "agents/etl",
-    "agents/etl/hourly_refresh.sh":      "agents/etl",
-    "agents/etl/weekly_refresh.sh":      "agents/etl",
+    "agents/etl/daily_refresh.sh":        "agents/etl",
+    "agents/etl/hourly_refresh.sh":       "agents/etl",
+    "agents/etl/weekly_refresh.sh":       "agents/etl",
     "agents/signals/run_signal_cycle.sh": "agents/signals",
+    "agents/signals/refresh_now.sh":      "agents/signals",
 }
 
 # runner name → allowed extensions of the script argument
 PYTHON_RUNNERS = {
     "run_bronze", "run_silver", "run_gold", "run_consumption",
-    "run_pipeline_step",
+    "run_pipeline_step", "step",
 }
-SQL_RUNNERS = {"run_pipeline_sql"}
+SQL_RUNNERS = {"run_pipeline_sql", "sql_step"}
 
+# Calls whose script argument contains a shell variable ("${VAR}/...") are
+# skipped — those paths are runtime-guarded with [ -f ] at the call sites.
 CALL_RE = re.compile(
-    r'^\s*(run_bronze|run_silver|run_gold|run_consumption|run_pipeline_step|run_pipeline_sql)'
+    r'^\s*(run_bronze|run_silver|run_gold|run_consumption|run_pipeline_step|run_pipeline_sql|step|sql_step)'
     r'\s+"[^"]*"\s+"([^"$]+)"'
 )
 

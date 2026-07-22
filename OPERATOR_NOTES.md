@@ -95,6 +95,33 @@ things the numbers themselves now show:
 - [ ] Frontend/conviction gating on trade_count_oos decided
 - [ ] COMM_* sign convention normalized or runs re-delivered
 
+### 6. 2026-07-22 upload: fabricated/laundered metrics in prod (found in review)
+Three scripts from the 2026-07-22 drop (now quarantined in
+`workspace/oneoff/`, see its README) already ran against prod:
+1. **Estimated profit factors in the measured column.** `estimate_missing_
+   backtest_pf.py` wrote heuristic PF (`1 + return/|dd|`, sentinel 999)
+   into `strategy_backtest_runs.profit_factor_oos`, which
+   `v_pipeline_ui_feed` serves as "BT PF". Revert:
+   `UPDATE gold.strategy_backtest_runs SET profit_factor_oos = NULL
+    WHERE notes LIKE '%estimated_return_drawdown%';`
+2. **Reverse-synced backtest rows.** `backfill_etf_win_rate_oos.py`
+   rewrote 8 ETF strategies' latest backtest rows to match registry values
+   — runs→registry provenance destroyed for those rows; treat their
+   win_rate_oos as unverifiable until qr_research re-delivers.
+3. **Synthetic trades in the real ledger.** `backfill_strategy_live_data.py`
+   wrote synthetic PAPER fills into `gold.trade_executions` (read by
+   execution_fills + detail-page Trades). Quantify:
+   `SELECT COUNT(*) FROM gold.trade_executions te
+    WHERE EXISTS (SELECT 1 FROM gold.strategy_registry sr
+                  WHERE sr.strategy_id = te.strategy_id
+                    AND sr.execution_mode = 'PAPER');`
+   Decide: move them to paper_trades_synthetic, or add a source column
+   ('real'|'synthetic') and make consumption views filter.
+
+- [ ] Estimated PFs reverted on prod
+- [ ] Reverse-synced ETF backtest rows flagged to qr_research
+- [ ] trade_executions synthetic rows separated or labeled
+
 
 ---
 
