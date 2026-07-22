@@ -45,6 +45,57 @@ operator decision, not a cleanup side effect.
 
 - [ ] `DROP TABLE gold.stock_metrics` (or document a reason to keep it)
 
+### 4. `gold.strategy_signals` id-space collision (found 2026-07-17)
+RESOLVED-ROOT-CAUSE 2026-07-17: the writer was identified — a transient
+kanban recovery script (`~/.hermes/kanban/boards/trading/workspaces/
+t_e8dd1cf1/refresh_pipeline.py`) wrote 3 semantic-strategy rows with
+numeric ids 1/2/3 on 2026-05-29, one time. No ACTIVE writer misuses the
+table; `gold.strategy_signals` remains exclusively the signal agent's
+numeric-keyed table (written by `base_strategy.save()`), and semantic
+strategies flow through `strategy_ticker_scores` (+ history). Remaining
+operator action — delete the 3 junk rows (prod data deletion, operator
+runs it):
+
+```sql
+DELETE FROM gold.strategy_signals
+WHERE date = '2026-05-29'
+  AND (strategy_id, strategy_name) IN
+      ((1, 'cot_contrarian_extreme'),
+       (2, 'cl_cot_trend'),
+       (3, 'gc_cot_contrarian_inverse'));
+```
+
+Related: `strategy_backtests` rows id=2 and id=3 carry byte-identical
+metrics (copy artifact from the same recovery incident) — the legacy table
+should receive no new writes.
+
+- [x] Semantic signal writer identified (dead one-off, no active misuse)
+- [ ] 3 junk rows deleted (operator)
+
+### 5. OOS stats data-quality observations (post-sync, 2026-07-17)
+The re-pointed sync populated 31 registry rows with real OOS stats. Two
+things the numbers themselves now show:
+1. **`pead_short_negative_surprise` tops the leaderboard with Sharpe 17.65,
+   win rate 100%, max DD 0 — on 3 trades.** Statistically meaningless, and
+   the frontend ranks by it. `strategy_backtest_runs` already computes
+   `passed_trade_count` (>30) and `all_risk_gates_passed`; the tier/
+   priority display (and any capital decision) should gate on those rather
+   than raw Sharpe. Recommendation: expose `trade_count_oos` gates in the
+   frontend ranking, or add a `gates_passed` flag to the registry sync —
+   do NOT silently filter the data itself.
+2. **`max_drawdown_oos` sign convention is now mixed in the registry**:
+   synced rows store positive magnitudes (ABS(), the table's existing
+   convention), but three pre-existing COMM_* rows carry NEGATIVE values
+   with NULL win rates — written by an earlier handoff outside the sync
+   (they have no backtest_runs rows, yet have stats). Normalize the sign
+   (`UPDATE ... SET max_drawdown_oos = ABS(max_drawdown_oos) WHERE
+   max_drawdown_oos < 0`) or re-deliver those strategies' runs properly
+   via qr_research.
+
+- [ ] Frontend/conviction gating on trade_count_oos decided
+- [ ] COMM_* sign convention normalized or runs re-delivered
+
+
 ---
 
 ## 🔭 Optimization backlog (from the 2026-07-10 full etl+signals review)
@@ -63,7 +114,7 @@ would have caught both:
   run_consumption/run_pipeline_step` in the refresh shells and asserts the
   file exists and its extension matches the runner.
 
-### P0-2. Unify the three strategy-id spaces 🟡 PLUMBING DONE 2026-07-10 (migration 006 bridge column + sync rewrite) — **operator must backfill the numeric→semantic mapping**, see migration header
+### P0-2. Unify the three strategy-id spaces ✅ RESOLVED 2026-07-17 — diagnostic proved NO mapping exists: smallint ids 1/2/3 in strategy_backtests are signal-agent artifacts (1=Dual EMA, 2=52wk-high, 3=RSI(2), confirmed via strategy_signals.strategy_name + registry.json); registry_strategy_id stays NULL by design. Real OOS runs live in `gold.strategy_backtest_runs` (semantic-keyed, 59 strategies) and `update_strategy_registry.py` now syncs from there. The 006 bridge remains for any future operator-mapped legacy row.
 `registry.json` uses numeric ids (1–20), `gold.strategy_registry` uses
 semantic varchar ids (`btc_funding_mean_rev_short`), and
 `gold.strategy_backtests` uses smallint ids. Consequences observed live:

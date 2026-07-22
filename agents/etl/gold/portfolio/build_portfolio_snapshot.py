@@ -9,8 +9,7 @@
 Gold Portfolio: Live Positions & Portfolio Snapshots
 Reads from: bronze.ibkr_positions_live, gold.paper_strategies,
             gold.strategy_ticker_scores
-Writes to:  gold.ibkr_positions_live, gold.portfolio_snapshots,
-            gold.trade_executions
+Writes to:  gold.ibkr_positions_live, gold.portfolio_snapshots
 """
 import sys, os
 sys.path.insert(0, 'shared/scripts')
@@ -47,6 +46,22 @@ ON CONFLICT (account, ticker) DO UPDATE SET
 """
 
 SQL_SNAPSHOT = """
+WITH latest_account AS (
+    SELECT
+        net_liquidation,
+        COALESCE(cash_hkd, 0) + COALESCE(cash_usd, 0) AS cash_value
+    FROM gold.ibkr_account_summary
+    ORDER BY fetched_at DESC
+    LIMIT 1
+),
+position_summary AS (
+    SELECT
+        COALESCE(SUM(market_value), 0) AS raw_positions_value,
+        COALESCE(SUM(unrealized_pnl), 0) AS daily_pnl,
+        COALESCE(SUM(ABS(market_value)), 0) AS gross_exposure,
+        COALESCE(SUM(CASE WHEN side = 'SHORT' THEN -ABS(market_value) ELSE market_value END), 0) AS net_exposure
+    FROM gold.ibkr_positions_live
+)
 INSERT INTO gold.portfolio_snapshots
   (snapshot_date, portfolio_type,
    total_value, cash_value, positions_value,
@@ -56,21 +71,23 @@ INSERT INTO gold.portfolio_snapshots
 SELECT
   CURRENT_DATE,
   'live' AS portfolio_type,
-  SUM(market_value) AS total_value,
-  0 AS cash_value,
-  SUM(market_value) AS positions_value,
-  SUM(unrealized_pnl) AS daily_pnl,
-  SUM(unrealized_pnl) / NULLIF(SUM(market_value), 0) * 100 AS daily_pnl_pct,
-  SUM(ABS(market_value)) / NULLIF(SUM(market_value), 0) AS gross_exposure,
-  SUM(CASE WHEN side = 'LONG' THEN market_value ELSE -market_value END)
-    / NULLIF(SUM(market_value), 0) AS net_exposure,
+  la.net_liquidation AS total_value,
+  la.cash_value,
+  COALESCE(la.net_liquidation, 0) - la.cash_value AS positions_value,
+  ps.daily_pnl,
+  ps.daily_pnl / NULLIF(la.net_liquidation - la.cash_value, 0) * 100 AS daily_pnl_pct,
+  ps.gross_exposure,
+  ps.net_exposure,
   NOW()
-FROM gold.ibkr_positions_live
+FROM position_summary ps, latest_account la
 ON CONFLICT (snapshot_date, portfolio_type) DO UPDATE SET
   total_value       = EXCLUDED.total_value,
+  cash_value        = EXCLUDED.cash_value,
   positions_value   = EXCLUDED.positions_value,
   daily_pnl         = EXCLUDED.daily_pnl,
   daily_pnl_pct     = EXCLUDED.daily_pnl_pct,
+  gross_exposure    = EXCLUDED.gross_exposure,
+  net_exposure      = EXCLUDED.net_exposure,
   calculated_at     = NOW();
 """
 
@@ -122,30 +139,11 @@ def run():
     has_cons_table = cur.fetchone()[0]
     
     if has_cons_table:
-        # Also sync account summary from gold to consumption for frontend
-        cur.execute("""
-            INSERT INTO consumption.portfolio_positions_current
-                (strategy_id, ticker, side, entry_date, entry_price, current_price,
-                 quantity, market_value, weight_pct, unrealized_pnl, realized_pnl, status, updated_at)
-            SELECT
-                'LIVE_IBKR_CASH' AS strategy_id,
-                'HKD' AS ticker,
-                'LONG' AS side,
-                CURRENT_DATE AS entry_date,
-                cash_hkd AS entry_price,
-                cash_hkd AS current_price,
-                1 AS quantity,
-                cash_hkd AS market_value,
-                100.0 AS weight_pct,
-                0 AS unrealized_pnl,
-                0 AS realized_pnl,
-                'ACTIVE' AS status,
-                NOW() AS updated_at
-            FROM gold.ibkr_account_summary
-            WHERE cash_hkd IS NOT NULL
-            ON CONFLICT DO NOTHING;
-        """)
-        print(f"✅ Cash position synced to consumption: {cur.rowcount} rows")
+        # Previously this script inserted a synthetic HKD cash row into the
+        # positions table.  Cash is now reported from gold.ibkr_account_summary
+        # via the consumption.account_summary view, so we no longer pollute
+        # the positions table with a cash pseudo-position.
+        print("✅ Cash position is sourced from gold.ibkr_account_summary; no synthetic position row inserted")
     else:
         print("⚠️  consumption.portfolio_positions_current does not exist — skipping consumption sync")
     

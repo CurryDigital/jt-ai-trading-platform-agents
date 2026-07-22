@@ -12,7 +12,7 @@ from db import get_connection
 SQL_SIGNAL_LOGS = """
 INSERT INTO consumption.signal_logs
   (strategy_id, ticker, signal_type, signal_criteria, confidence,
-   signal, logged_at)
+   signal, signal_date, logged_at)
 SELECT
   sts.strategy_id::text,
   sts.ticker,
@@ -20,9 +20,11 @@ SELECT
   sts.criteria_met::text,
   sts.score::double precision,
   CASE WHEN sts.signal_action = 'BUY' THEN 1 ELSE 0 END,
+  CURRENT_DATE,
   NOW()
 FROM gold.strategy_ticker_scores sts
 WHERE sts.signal_action IN ('BUY', 'SELL')
+  AND sts.ticker != 'CASH'
   AND sts.updated_at >= NOW() - INTERVAL '1 day'
 ON CONFLICT DO NOTHING;
 """

@@ -12,7 +12,7 @@ from db import get_connection
 UPSERT_SQL = """
 INSERT INTO silver.unified_prices
     (ticker, asset_class, market, date, open, high, low, close, volume,
-     adjusted_close, returns_1d, returns_log, primary_source, all_sources, updated_at)
+     adjusted_close, returns_1d, returns_log, source, primary_source, all_sources, updated_at)
 WITH ranked AS (
     -- yfinance equities/ETFs (priority 1)
     SELECT
@@ -90,6 +90,7 @@ SELECT
         LN(NULLIF(b.close, 0) / NULLIF(LAG(b.close) OVER (PARTITION BY b.ticker ORDER BY b.date), 0)),
         6
     ) AS returns_log,
+    b.src AS source,
     b.src AS primary_source,
     jsonb_build_array(b.src) AS all_sources,
     NOW() AS updated_at
@@ -104,6 +105,7 @@ ON CONFLICT (ticker, date) DO UPDATE SET
     adjusted_close  = EXCLUDED.adjusted_close,
     returns_1d      = EXCLUDED.returns_1d,
     returns_log     = EXCLUDED.returns_log,
+    source          = EXCLUDED.source,
     primary_source  = EXCLUDED.primary_source,
     all_sources     = EXCLUDED.all_sources,
     updated_at      = NOW();
@@ -134,7 +136,7 @@ def run():
         simple_sql = """
         INSERT INTO silver.unified_prices
             (ticker, asset_class, market, date, open, high, low, close, volume,
-             adjusted_close, returns_1d, returns_log, primary_source, all_sources, updated_at)
+             adjusted_close, returns_1d, returns_log, source, primary_source, all_sources, updated_at)
         WITH all_yf AS (
             SELECT ticker, date, open, high, low, close, volume, adjusted_close
             FROM bronze.yf_prices
@@ -162,6 +164,7 @@ def run():
                 LN(NULLIF(GREATEST(yf.close, 0.0001), 0) / NULLIF(GREATEST(LAG(yf.close) OVER (PARTITION BY yf.ticker ORDER BY yf.date), 0.0001), 0)),
                 6
             ) AS returns_log,
+            'yfinance' AS source,
             'yfinance' AS primary_source,
             jsonb_build_array('yfinance') AS all_sources,
             NOW() AS updated_at
@@ -176,6 +179,7 @@ def run():
             adjusted_close  = EXCLUDED.adjusted_close,
             returns_1d      = EXCLUDED.returns_1d,
             returns_log     = EXCLUDED.returns_log,
+            source          = EXCLUDED.source,
             primary_source  = EXCLUDED.primary_source,
             all_sources     = EXCLUDED.all_sources,
             updated_at      = NOW();

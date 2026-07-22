@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
 """
 Gold Strategy: Registry Update
-Reads from: gold.strategy_backtests (latest backtest results)
+Reads from: gold.strategy_backtest_runs (canonical qr_research OOS runs)
 Writes to:  gold.strategy_registry
 
-Syncs win_rate_oos, sharpe_oos, max_drawdown_oos, trade_count_oos from
-the latest backtest into the live registry record.
+Syncs win_rate_oos, sharpe_oos, max_drawdown_oos, trade_count_oos from the
+latest OOS backtest run into the live registry record.
+
+2026-07-17: source of truth switched from gold.strategy_backtests to
+gold.strategy_backtest_runs, based on the diagnose_backtest_id_mapping.py
+evidence run against prod:
+  - strategy_backtest_runs is semantic-keyed (same varchar ids as
+    strategy_registry), has a proper IS/OOS split, risk gates, run_number,
+    and holds 59 strategies' runs including every frontend strategy — it is
+    unambiguously qr_research's real output table.
+  - strategy_backtests (smallint ids 1,2,3) turned out to be SIGNAL-AGENT
+    numeric-space artifacts (1=Dual EMA, 2=52wk-high, 3=RSI(2), confirmed
+    via gold.strategy_signals.strategy_name + registry.json), with NO
+    semantic counterpart. Their registry_strategy_id stays NULL by design;
+    the migration-006 bridge remains as a secondary pass for any legacy row
+    an operator explicitly maps in the future.
 
 Usage:
-  python3 update_strategy_registry.py                  # sync all from backtests
+  python3 update_strategy_registry.py                  # sync all
   python3 update_strategy_registry.py --strategy S015  # manual patch one strategy
 """
 import sys, os, argparse
@@ -20,83 +34,102 @@ if _ETL_SHARED not in sys.path: sys.path.insert(0, _ETL_SHARED)
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
-# 2026-07-10 (P0-2): join on registry_strategy_id (migration 006 bridge
-# column) with a fallback to the old smallint::varchar cast. The cast alone
-# can never match real data ("11" != "cl_cot_trend") — that's why OOS stats
-# synced 0 rows and the frontend showed "Trades (OOS): —" everywhere.
-# Backtest rows with NULL registry_strategy_id are honestly excluded from
-# the bridged join; sync_all() reports the unmapped count loudly instead of
-# letting them silently vanish.
-SQL_SYNC_ALL = """
+# Latest OOS run per strategy = most recent oos_end, then highest run_number
+# (re-runs of the same window), then created_at as the final tiebreak.
+# max_drawdown_oos is stored negative in backtest_runs (risk gate checks
+# `> -0.20`); the registry stores it as a positive magnitude (previous sync
+# convention, ABS()) — kept for continuity with existing registry rows.
+SQL_SYNC_FROM_RUNS = """
 UPDATE gold.strategy_registry sr
 SET
-  win_rate_oos      = b.win_rate,
-  sharpe_oos        = b.sharpe,
-  max_drawdown_oos  = ABS(b.max_dd),
-  trade_count_oos   = b.n_trades,
-  updated_at        = NOW()
-FROM (
-  SELECT DISTINCT ON (COALESCE(registry_strategy_id, strategy_id::varchar))
-    COALESCE(registry_strategy_id, strategy_id::varchar) AS ref_id,
-    win_rate,
-    sharpe,
-    max_dd,
-    n_trades
-  FROM gold.strategy_backtests
-  ORDER BY COALESCE(registry_strategy_id, strategy_id::varchar), run_date DESC
-) b
-WHERE sr.strategy_id = b.ref_id;
-"""
-
-# Pre-006 fallback: the legacy cast-only join (matches nothing against real
-# data, but keeps the script runnable on an unmigrated DB while warning).
-SQL_SYNC_ALL_LEGACY = """
-UPDATE gold.strategy_registry sr
-SET
-  win_rate_oos      = b.win_rate,
-  sharpe_oos        = b.sharpe,
-  max_drawdown_oos  = ABS(b.max_dd),
-  trade_count_oos   = b.n_trades,
+  win_rate_oos      = r.win_rate_oos,
+  sharpe_oos        = r.sharpe_oos,
+  max_drawdown_oos  = ABS(r.max_drawdown_oos),
+  trade_count_oos   = r.trade_count_oos,
   updated_at        = NOW()
 FROM (
   SELECT DISTINCT ON (strategy_id)
-    strategy_id, win_rate, sharpe, max_dd, n_trades
-  FROM gold.strategy_backtests
-  ORDER BY strategy_id, run_date DESC
-) b
-WHERE sr.strategy_id = b.strategy_id::varchar;
+    strategy_id, sharpe_oos, max_drawdown_oos, win_rate_oos, trade_count_oos
+  FROM gold.strategy_backtest_runs
+  WHERE sharpe_oos IS NOT NULL
+  ORDER BY strategy_id, oos_end DESC, run_number DESC, created_at DESC
+) r
+WHERE sr.strategy_id = r.strategy_id;
 """
 
-SQL_UNMAPPED_COUNT = """
-SELECT COUNT(DISTINCT strategy_id)
-FROM gold.strategy_backtests
-WHERE registry_strategy_id IS NULL;
+# Registry strategies with no backtest run at all — their OOS fields stay
+# NULL, which the frontend correctly renders as "—". Reported, not hidden.
+SQL_NO_RUNS = """
+SELECT sr.strategy_id
+FROM gold.strategy_registry sr
+WHERE sr.retired_at IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM gold.strategy_backtest_runs r
+    WHERE r.strategy_id = sr.strategy_id AND r.sharpe_oos IS NOT NULL
+  )
+ORDER BY sr.strategy_id;
 """
+
+# Secondary pass: legacy gold.strategy_backtests rows an operator has
+# explicitly mapped via migration 006's registry_strategy_id. Confirmed
+# 2026-07-17: the 3 existing rows are signal-agent artifacts and stay
+# unmapped (NULL) — this pass currently matches nothing, by design.
+SQL_SYNC_BRIDGED_LEGACY = """
+UPDATE gold.strategy_registry sr
+SET
+  win_rate_oos      = b.win_rate,
+  sharpe_oos        = b.sharpe,
+  max_drawdown_oos  = ABS(b.max_dd),
+  trade_count_oos   = b.n_trades,
+  updated_at        = NOW()
+FROM (
+  SELECT DISTINCT ON (registry_strategy_id)
+    registry_strategy_id, win_rate, sharpe, max_dd, n_trades
+  FROM gold.strategy_backtests
+  WHERE registry_strategy_id IS NOT NULL
+  ORDER BY registry_strategy_id, run_date DESC
+) b
+WHERE sr.strategy_id = b.registry_strategy_id
+  AND NOT EXISTS (
+    SELECT 1 FROM gold.strategy_backtest_runs r
+    WHERE r.strategy_id = sr.strategy_id AND r.sharpe_oos IS NOT NULL
+  );
+"""
+
 
 def sync_all(conn):
     cur = conn.cursor()
+
+    cur.execute("SELECT to_regclass('gold.strategy_backtest_runs')")
+    if cur.fetchone()[0] is None:
+        print("❌ gold.strategy_backtest_runs does not exist — cannot sync OOS stats.")
+        conn.rollback()
+        return
+
+    cur.execute(SQL_SYNC_FROM_RUNS)
+    print(f"✅ gold.strategy_registry synced from strategy_backtest_runs: "
+          f"{cur.rowcount} rows updated")
+
     cur.execute("""
         SELECT 1 FROM information_schema.columns
         WHERE table_schema = 'gold' AND table_name = 'strategy_backtests'
           AND column_name = 'registry_strategy_id'
     """)
-    has_bridge = cur.fetchone() is not None
+    if cur.fetchone() is not None:
+        cur.execute(SQL_SYNC_BRIDGED_LEGACY)
+        if cur.rowcount:
+            print(f"✅ plus {cur.rowcount} rows from operator-mapped legacy "
+                  f"strategy_backtests (migration 006 bridge)")
 
-    if has_bridge:
-        cur.execute(SQL_SYNC_ALL)
-        print(f"✅ gold.strategy_registry synced from backtests: {cur.rowcount} rows updated")
-        cur.execute(SQL_UNMAPPED_COUNT)
-        n_unmapped = cur.fetchone()[0]
-        if n_unmapped:
-            print(f"⚠️  {n_unmapped} backtest strategy id(s) have no registry_strategy_id "
-                  f"mapping — their OOS stats cannot reach gold.strategy_registry. "
-                  f"Backfill per db_setup/migrations/006_backtest_registry_id_bridge.sql.")
-    else:
-        cur.execute(SQL_SYNC_ALL_LEGACY)
-        print(f"⚠️  migration 006 not applied — legacy cast join matched "
-              f"{cur.rowcount} rows (expected 0 against real data). "
-              f"Apply db_setup/migrations/006_backtest_registry_id_bridge.sql.")
+    cur.execute(SQL_NO_RUNS)
+    missing = [r[0] for r in cur.fetchall()]
+    if missing:
+        print(f"ℹ️  {len(missing)} active registry strategies have no OOS backtest "
+              f"run — their stats stay NULL (frontend shows '—') until qr_research "
+              f"delivers runs: {missing}")
+
     conn.commit()
+
 
 def patch_one(conn, strategy_id: str, **kwargs):
     """Manually update a specific strategy's registry entry."""
@@ -117,6 +150,7 @@ def patch_one(conn, strategy_id: str, **kwargs):
     )
     print(f"✅ {strategy_id} patched: {cur.rowcount} row(s) updated")
     conn.commit()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

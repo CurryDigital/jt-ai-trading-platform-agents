@@ -26,6 +26,9 @@ ON CONFLICT (book, as_of_date) DO UPDATE SET
 """
 
 SQL_UPSERT_SNAPSHOT = """
+-- Paper snapshots only.  Live IBKR NAV is sourced above from
+-- gold.ibkr_account_summary.net_liquidation and must NOT be overwritten
+-- by a stale positions-only portfolio snapshot.
 INSERT INTO gold.account_nav_daily (book, as_of_date, equity, pnl)
 SELECT
     portfolio_type AS book,
@@ -33,7 +36,7 @@ SELECT
     COALESCE(total_value, 0) AS equity,
     COALESCE(daily_pnl, 0) AS pnl
 FROM gold.portfolio_snapshots
-WHERE portfolio_type IN ('live', 'paper')
+WHERE portfolio_type = 'paper'
   AND total_value IS NOT NULL
 ON CONFLICT (book, as_of_date) DO UPDATE SET
     equity = EXCLUDED.equity,

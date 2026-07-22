@@ -347,11 +347,18 @@ ORDER BY
 -- Old non-US/HK rows survive in the underlying table; this view filters them.
 CREATE OR REPLACE VIEW consumption.dashboard_indices AS
 SELECT
-    index_ticker AS sym,
-    index_name   AS name,
+    index_ticker   AS sym,
+    index_name     AS name,
     region,
-    current_value AS last,
+    current_value  AS last,
     change_pct,
+    change_1d,
+    change_1w,
+    change_1m,
+    change_ytd,
+    est_1d,
+    est_1w,
+    est_1m,
     spark,
     updated_at
 FROM consumption.dashboard_market_overview

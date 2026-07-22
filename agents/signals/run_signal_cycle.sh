@@ -138,6 +138,9 @@ PIPELINE_FAILURES=()
 #    → gold.strategy_ticker_scores
 run_pipeline_step "Strategy scores" "pipeline/build_strategy_scores.py"
 
+# HK Quality BlueChips paper-strategy signal ingestion (ETL-side, task t_259b9936)
+run_pipeline_step "HK Quality BlueChips signal" "${SIGNALS_DIR}/../etl/gold/strategy/ingest_hk_quality_bluechips_t_259b9936.py"
+
 # 2. S9 MACD daily signal generation
 run_pipeline_step "S9 MACD signals" "pipeline/s9_macd_daily.py"
 
@@ -178,6 +181,23 @@ fi
 #    final scores from every writer above. Without this, strategy_ticker_
 #    scores overwrites itself and yesterday's signals are unrecoverable. ──
 run_pipeline_step "Signal history snapshot" "pipeline/snapshot_ticker_scores.py"
+
+# ── Generic position-aware paper rebalancer (after all signal writers) ───────
+# Rebuilds consumption.strategies_signals_current and gold.paper_trades_
+# synthetic from gold.strategy_ticker_scores + silver.unified_prices.
+# Enforces one open position per (strategy_id, ticker) and one signal per
+# (strategy_id, ticker) at the DB level.
+REBALANCER="${SIGNALS_DIR}/../etl/gold/strategy/rebuild_paper_positions.py"
+if [ -f "${REBALANCER}" ]; then
+    run_pipeline_step "Position-aware paper rebalancer" "${REBALANCER}"
+else
+    echo "⚠️ Rebalancer not found at ${REBALANCER} — skipping"
+    PIPELINE_FAILURES+=("rebalancer_missing")
+fi
+
+if [ ${#PIPELINE_FAILURES[@]} -gt 0 ]; then
+    echo "⚠️ Signal pipeline failures: ${PIPELINE_FAILURES[*]}"
+fi
 
 echo "=========================================="
 echo "SIGNAL CYCLE COMPLETED: $(date)"
