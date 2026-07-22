@@ -79,6 +79,53 @@ def _run_sql(script_abs, timeout):
     return subprocess.run([PYTHON, "-c", driver], timeout=timeout).returncode
 
 
+# ── Freshness rollout (PIPELINE_DESIGN.md principle 4) ────────────────────
+# The staleness dashboard was blind to the whole silver layer + a couple of
+# bronze jobs because freshness marking was opt-in per script. The runner
+# closes that gap by construction: after every step it stamps
+# gold.source_freshness — EXCEPT for steps whose script already self-stamps
+# (ingest_binance, fmp, yfinance_prices, ...), which own their freshness with
+# meaningful source names. Detection is a cheap one-time grep per script.
+# Everything here soft-fails: freshness bookkeeping must never fail a step.
+_self_stamp_cache = {}
+
+
+def _script_self_stamps(script_abs) -> bool:
+    if script_abs not in _self_stamp_cache:
+        try:
+            with open(script_abs) as f:
+                body = f.read()
+            _self_stamp_cache[script_abs] = (
+                "mark_source_refreshed" in body or "freshness_guard" in body
+            )
+        except Exception:
+            _self_stamp_cache[script_abs] = True  # assume yes → don't double-stamp
+    return _self_stamp_cache[script_abs]
+
+
+def _stamp_freshness(step, ok):
+    """Mark gold.source_freshness for a manifest step the script didn't self-stamp."""
+    script_abs = os.path.join(HERE, step["script"])
+    if _script_self_stamps(script_abs):
+        return
+    source = f"{step['stage']}:{os.path.splitext(os.path.basename(step['script']))[0]}"
+    freq = {"daily": "daily", "hourly": "hourly", "weekly": "weekly"}.get(step["cadence"], "daily")
+    try:
+        sys.path.insert(0, os.path.join(HERE, "shared", "scripts"))
+        from db import get_connection
+        from freshness import mark_source_refreshed
+        conn = get_connection()
+        try:
+            mark_source_refreshed(
+                conn, source=source, expected_frequency=freq,
+                error=None if ok else "pipeline step failed (see run_stage log)",
+            )
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"    (freshness stamp skipped for {source}: {e})")
+
+
 def run_step(step, dry_run):
     script = step["script"]
     script_abs = os.path.join(HERE, script)
@@ -87,7 +134,8 @@ def run_step(step, dry_run):
     label = f"{step['stage']}:{step['name']}"
     if dry_run:
         a = (" " + " ".join(args)) if args else ""
-        print(f"  [dry-run] {label}  ->  {script}{a}  (timeout {timeout}s)")
+        stamp = "" if _script_self_stamps(script_abs) else "  [runner-stamps-freshness]"
+        print(f"  [dry-run] {label}  ->  {script}{a}  (timeout {timeout}s){stamp}")
         return True
     if not os.path.isfile(script_abs):
         print(f"  ⚠️ {label}: script not found ({script}) — skipping")
@@ -100,11 +148,14 @@ def run_step(step, dry_run):
             rc = _run_py(script_abs, args, timeout + KILL_GRACE)
     except subprocess.TimeoutExpired:
         print(f"  ⏱️ {label} TIMEOUT after {timeout}s")
+        _stamp_freshness(step, ok=False)
         return False
     if rc == 0:
         print(f"  ✅ {label}")
+        _stamp_freshness(step, ok=True)
         return True
     print(f"  ⚠️ {label} FAILED (exit {rc})")
+    _stamp_freshness(step, ok=False)
     return False
 
 

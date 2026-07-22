@@ -41,6 +41,11 @@ consumer can see age. Stale is a *state*, never hidden. Signals computed from
 a stale gold layer are refused at the gate (`gold_layer_state`), not silently
 produced.
 
+*Implementation:* `run_stage.py` stamps `gold.source_freshness` for every
+manifest step whose script doesn't self-stamp — so coverage is complete by
+construction, not opt-in. Scripts that self-stamp (bronze ingesters) keep
+their own meaningful source names; the runner fills the rest.
+
 ### 5. Explicit over implicit
 No glob-sweep-the-directory-and-run-everything. That caused the double-Yahoo
 ingest, the aux-script timeout, and the `# CADENCE: weekly` marker hack. What

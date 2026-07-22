@@ -194,7 +194,7 @@ cadence, timeout, enabled) + one runner would replace the duplicated
 `run_*` functions across daily/hourly/weekly shells and make "what runs
 when" reviewable in a single diff.
 
-### P1-6. Standardize freshness marking 🟡 STARTED 2026-07-10 (`freshness_guard` context manager added to shared/scripts/freshness.py; ingest_yfinance_prices.py converted as the reference — remaining scripts to migrate opportunistically)
+### P1-6. Standardize freshness marking ✅ DONE 2026-07-22 — `freshness_guard` context manager (shared/scripts/freshness.py) + run_stage.py now stamps gold.source_freshness for EVERY manifest step whose script doesn't already self-stamp (38 previously-blind silver/gold/consumption/VIX steps now covered; 17 self-stampers keep their own source names). Complete-by-construction: any new manifest step gets freshness for free. Requires the daily/hourly cron cutover to run_stage.py (flag 1b) to take effect on the recurring path.
 `gold.source_freshness` coverage is opt-in per script — some mark, some
 don't (ingest_yfinance_prices.py only gained it in this review). Wrap it
 once in `shared/scripts` (context manager or decorator) and require it via
