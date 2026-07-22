@@ -121,6 +121,11 @@ Three scripts from the 2026-07-22 drop (now quarantined in
 - [ ] Estimated PFs reverted on prod
 - [ ] Reverse-synced ETF backtest rows flagged to qr_research
 - [ ] trade_executions synthetic rows separated or labeled
+       → migration 009 adds gold.trade_executions.execution_source with an
+         evidence-based backfill (paper/sim fills lacking an ibkr_order_id →
+         'synthetic') + consumption.execution_fills_real (real fills only).
+         Apply 009, verify the printed synthetic count, then point the
+         detail page's Live WR/P&L at execution_fills_real.
 
 
 ---

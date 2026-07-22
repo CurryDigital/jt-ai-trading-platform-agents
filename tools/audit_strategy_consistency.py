@@ -65,12 +65,22 @@ def main() -> int:
     cur.execute("SELECT DISTINCT strategy_id FROM gold.strategy_signal_criteria")
     has_criteria = {r[0] for r in cur.fetchall()}
 
-    # Latest ticker-score freshness + count per strategy.
-    cur.execute("""
-        SELECT strategy_id, COUNT(*), MAX(updated_at)
-        FROM gold.strategy_ticker_scores GROUP BY strategy_id
-    """)
-    scores = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    # Latest ticker-score freshness + count per strategy, plus provenance
+    # (migration 009) when available — distinguishes computed vs file-ingested.
+    from quality import column_exists
+    if column_exists(cur, 'gold', 'strategy_ticker_scores', 'signal_source'):
+        cur.execute("""
+            SELECT strategy_id, COUNT(*), MAX(updated_at),
+                   MAX(signal_source) FILTER (WHERE signal_source='ingested') AS ingested
+            FROM gold.strategy_ticker_scores GROUP BY strategy_id
+        """)
+        scores = {r[0]: (r[1], r[2], r[3] == 'ingested') for r in cur.fetchall()}
+    else:
+        cur.execute("""
+            SELECT strategy_id, COUNT(*), MAX(updated_at)
+            FROM gold.strategy_ticker_scores GROUP BY strategy_id
+        """)
+        scores = {r[0]: (r[1], r[2], None) for r in cur.fetchall()}
 
     # Backtest completeness (latest run per strategy).
     cur.execute("""
@@ -104,14 +114,18 @@ def main() -> int:
         if sid in has_criteria:
             return "criteria"
         if sid in scores:
-            # Has scores but no computed/criteria path → onboarded by a
-            # one-off ingest and not recurring.
+            # signal_source (migration 009) tells us if this is genuinely a
+            # recurring file-ingested strategy vs a stale one-off onboarding.
+            if scores[sid][2] is True:
+                return "file-ingest"
+            if scores[sid][2] is None:
+                return "ONBOARD-ONLY?"   # pre-009: can't tell ingest from onboard
             return "ONBOARD-ONLY"
         return "NONE"
 
     rows = []
     for sid, r in reg.items():
-        n_scores, fresh = scores.get(sid, (0, None))
+        n_scores, fresh, is_ingested = scores.get(sid, (0, None, None))
         stale = _days_stale(fresh)
         b = bt.get(sid)
         pf_estimated = bool(b and b[5] and 'estimated_return_drawdown' in (b[5] or ''))
@@ -147,7 +161,7 @@ def main() -> int:
     print("\n" + "=" * 110)
     print("PROBLEM ROLLUPS")
     print("=" * 110)
-    onboard_only = flag(lambda x: x['mech'] == 'ONBOARD-ONLY')
+    onboard_only = flag(lambda x: x['mech'].startswith('ONBOARD-ONLY'))
     no_path      = flag(lambda x: x['mech'] == 'NONE')
     stale7       = flag(lambda x: x['stale'] is not None and x['stale'] > 7)
     no_scores    = flag(lambda x: x['n_scores'] == 0)

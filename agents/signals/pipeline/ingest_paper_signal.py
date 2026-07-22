@@ -114,21 +114,52 @@ def ensure_strategy_registry(conn, strategy_id, strategy_name, asset_class,
 
 def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights):
     cur = conn.cursor()
-    rows = [
-        (
-            strategy_id, ticker, 100.0, "BUY", weight * 100, 0.0,
-            json.dumps({
-                "weight": weight,
-                "source_signal_file": signal_file,
-                "generated_at": generated_at,
-                "ingested_at": datetime.now(HKT).isoformat(),
-            }),
-            "PAPER", datetime.now(), datetime.now(),
-        )
-        for ticker, weight in weights.items()
-    ]
-    cur.executemany(
+    # Stamp provenance (migration 009) when the column exists, so these
+    # file-ingested rows are distinguishable from computed ones. Guarded so
+    # the same code runs on a pre-009 DB (column absent → omit it, DEFAULT
+    # 'computed' would apply, which is why the column check matters here).
+    try:
+        from quality import column_exists, SIGNAL_INGESTED
+        has_src = column_exists(cur, 'gold', 'strategy_ticker_scores', 'signal_source')
+    except Exception:
+        has_src = False
+
+    def crit(weight):
+        return json.dumps({
+            "weight": weight,
+            "source_signal_file": signal_file,
+            "generated_at": generated_at,
+            "ingested_at": datetime.now(HKT).isoformat(),
+        })
+
+    if has_src:
+        rows = [
+            (strategy_id, ticker, 100.0, "BUY", weight * 100, 0.0, crit(weight),
+             "PAPER", datetime.now(), datetime.now(), SIGNAL_INGESTED)
+            for ticker, weight in weights.items()
+        ]
+        sql = """
+        INSERT INTO gold.strategy_ticker_scores
+          (strategy_id, ticker, score, signal_action, entry_score, exit_score,
+           criteria_met, position_status, deployed_at, updated_at, signal_source)
+        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+        ON CONFLICT (strategy_id, ticker) DO UPDATE SET
+          score           = EXCLUDED.score,
+          signal_action   = EXCLUDED.signal_action,
+          entry_score     = EXCLUDED.entry_score,
+          exit_score      = EXCLUDED.exit_score,
+          criteria_met    = EXCLUDED.criteria_met,
+          position_status = EXCLUDED.position_status,
+          updated_at      = EXCLUDED.updated_at,
+          signal_source   = EXCLUDED.signal_source;
         """
+    else:
+        rows = [
+            (strategy_id, ticker, 100.0, "BUY", weight * 100, 0.0, crit(weight),
+             "PAPER", datetime.now(), datetime.now())
+            for ticker, weight in weights.items()
+        ]
+        sql = """
         INSERT INTO gold.strategy_ticker_scores
           (strategy_id, ticker, score, signal_action, entry_score, exit_score,
            criteria_met, position_status, deployed_at, updated_at)
@@ -141,9 +172,8 @@ def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights):
           criteria_met    = EXCLUDED.criteria_met,
           position_status = EXCLUDED.position_status,
           updated_at      = EXCLUDED.updated_at;
-        """,
-        rows,
-    )
+        """
+    cur.executemany(sql, rows)
     conn.commit()
     print(f"{now_hkt()} ✅ gold.strategy_ticker_scores upserted: {len(rows)} rows")
 
