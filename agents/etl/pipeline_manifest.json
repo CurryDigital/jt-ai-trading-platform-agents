@@ -1,0 +1,573 @@
+{
+  "_doc": [
+    "Declarative pipeline manifest (PIPELINE_DESIGN.md principle 5).",
+    "Replaces the glob-sweeps + duplicated run_* functions across",
+    "daily/hourly/weekly_refresh.sh. run_stage.py executes matching steps.",
+    "Each step: name, script (rel to agents/etl), stage, cadence, timeout(s),",
+    "enabled, optional args. Order within a (cadence,stage) = execution order.",
+    "Deduped vs the old shells: market builders + crypto_normalize +",
+    "market_overview each appear ONCE (resolves OPERATOR_NOTES flag 2).",
+    "The IBKR EC2 ssh runner is NOT here \u2014 it is not a python/sql script;",
+    "the shell wrapper keeps it. cadence 'weekly' replaces the",
+    "'# CADENCE: weekly' comment-marker hack."
+  ],
+  "schema_version": 1,
+  "stages_order": [
+    "bronze",
+    "silver",
+    "gold",
+    "consumption"
+  ],
+  "steps": [
+    {
+      "name": "Binance crypto",
+      "script": "bronze/binance/ingest_binance.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true,
+      "args": [
+        "1d"
+      ]
+    },
+    {
+      "name": "FMP",
+      "script": "bronze/fmp/ingest_fmp.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "HKEX",
+      "script": "bronze/hkex/ingest_hkex.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "YF VIX",
+      "script": "bronze/yfinance/ingest_vix.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "YF prices",
+      "script": "bronze/yfinance/ingest_yfinance_prices.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "YF aux (earnings+holdings)",
+      "script": "bronze/yfinance/ingest_yfinance_aux.py",
+      "stage": "bronze",
+      "cadence": "weekly",
+      "timeout": 1800,
+      "enabled": true
+    },
+    {
+      "name": "FRED",
+      "script": "bronze/fred/ingest_fred.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Manual",
+      "script": "bronze/manual/ingest_manual.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Crypto normalize",
+      "script": "silver/crypto_normalize.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Asset registry sync",
+      "script": "silver/sync_asset_registry.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Asset registry clean",
+      "script": "silver/clean_asset_registry.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Market indices sync",
+      "script": "silver/sync_market_indices.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Unified prices",
+      "script": "silver/clean_unified_prices.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Unified earnings",
+      "script": "silver/clean_unified_earnings.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Technical indicators",
+      "script": "silver/compute_technical_indicators.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Macro event calendar",
+      "script": "silver/build_macro_event_calendar.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "IBKR promote",
+      "script": "silver/promote_ibkr.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "IBKR orders promote",
+      "script": "silver/promote_ibkr_orders.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Crypto KPIs",
+      "script": "gold/crypto/crypto_metrics.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Crypto metrics build",
+      "script": "gold/crypto/build_crypto_kpis.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Equity earnings signals",
+      "script": "gold/equity/build_earnings_signals.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Equity KPIs",
+      "script": "gold/equity/build_equity_kpis.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Stock metrics history",
+      "script": "gold/equity/build_stock_metrics_history.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "FX metrics",
+      "script": "gold/fx/build_fx_metrics.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Commodity metrics",
+      "script": "gold/commodity/build_commodity_metrics.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Economic calendar",
+      "script": "gold/market/build_economic_calendar.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "IB gateway state",
+      "script": "gold/market/build_ib_gateway_state.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Macro KPIs",
+      "script": "gold/market/build_macro_kpis.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Macro sectors",
+      "script": "gold/market/build_macro_sectors.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Market breadth",
+      "script": "gold/market/build_market_breadth.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Market metrics",
+      "script": "gold/market/build_market_metrics.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Market movers",
+      "script": "gold/market/build_market_movers.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Market news",
+      "script": "gold/market/build_market_news.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Market sentiment",
+      "script": "gold/market/build_market_sentiment.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Macro regime forecast",
+      "script": "gold/market/build_regime_forecast.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Risk limits",
+      "script": "gold/market/build_risk_limits.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Account NAV daily",
+      "script": "gold/portfolio/build_account_nav_daily.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Manual positions fold-in",
+      "script": "gold/portfolio/build_manual_positions.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Portfolio snapshot",
+      "script": "gold/portfolio/build_portfolio_snapshot.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "IPO data",
+      "script": "gold/ipo/build_ipo_data.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Attention items",
+      "script": "gold/strategy/build_attention_items.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Strategy annual backtest returns",
+      "script": "gold/strategy/refresh_annual_backtest_returns.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "IBKR gold promote",
+      "script": "gold/promote_ibkr.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "IBKR orders gold promote",
+      "script": "gold/promote_ibkr_orders.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Market overview",
+      "script": "consumption/market/market_overview.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Command: account summary",
+      "script": "consumption/command/build_account_summary.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Command: signal logs",
+      "script": "consumption/command/command_signal_logs.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Command: stocks overview",
+      "script": "consumption/command/command_stocks_overview.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Lab: seasonality SUE",
+      "script": "consumption/lab/lab_research_seasonality_sue.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Lab: research signals",
+      "script": "consumption/lab/lab_research_signals.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Lab: strategy scores",
+      "script": "consumption/lab/lab_strategy_scores.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Performance: HFT matrix",
+      "script": "consumption/performance/performance_hft_matrix.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Performance: strategy results",
+      "script": "consumption/performance/performance_strategy_results.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Portfolio: attribution",
+      "script": "consumption/portfolio/portfolio_performance_attribution.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Portfolio: positions risk",
+      "script": "consumption/portfolio/portfolio_positions_risk.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Pipeline UI feed",
+      "script": "consumption/pipeline/build_pipeline_feed.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Binance crypto (hourly)",
+      "script": "bronze/binance/ingest_binance.py",
+      "stage": "bronze",
+      "cadence": "hourly",
+      "timeout": 120,
+      "enabled": true,
+      "args": [
+        "1h"
+      ]
+    },
+    {
+      "name": "IBKR TWS live (hourly)",
+      "script": "bronze/ibkr/ingest_ibkr_tws.py",
+      "stage": "bronze",
+      "cadence": "hourly",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "FMP quotes (hourly)",
+      "script": "bronze/fmp/ingest_fmp.py",
+      "stage": "bronze",
+      "cadence": "hourly",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Crypto normalize (hourly)",
+      "script": "silver/crypto_normalize.py",
+      "stage": "silver",
+      "cadence": "hourly",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Asset registry sync (hourly)",
+      "script": "silver/sync_asset_registry.py",
+      "stage": "silver",
+      "cadence": "hourly",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Market indices sync (hourly)",
+      "script": "silver/sync_market_indices.py",
+      "stage": "silver",
+      "cadence": "hourly",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Unified prices (hourly)",
+      "script": "silver/clean_unified_prices.py",
+      "stage": "silver",
+      "cadence": "hourly",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Crypto KPIs (hourly)",
+      "script": "gold/crypto/crypto_metrics.py",
+      "stage": "gold",
+      "cadence": "hourly",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Crypto metrics build (hourly)",
+      "script": "gold/crypto/build_crypto_kpis.py",
+      "stage": "gold",
+      "cadence": "hourly",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Market metrics (hourly)",
+      "script": "gold/market/build_market_metrics.py",
+      "stage": "gold",
+      "cadence": "hourly",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "FX metrics (hourly)",
+      "script": "gold/fx/build_fx_metrics.py",
+      "stage": "gold",
+      "cadence": "hourly",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Portfolio snapshot (hourly)",
+      "script": "gold/portfolio/build_portfolio_snapshot.py",
+      "stage": "gold",
+      "cadence": "hourly",
+      "timeout": 180,
+      "enabled": true
+    }
+  ]
+}

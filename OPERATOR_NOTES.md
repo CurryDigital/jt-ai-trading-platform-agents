@@ -20,6 +20,20 @@ strategy entries). Details: `agents/signals/pipeline/README.md`.
 
 - [ ] pipeline_b_signals.sh updated on server
 
+### 1b. Cut daily/hourly refresh over to run_stage.py (P1-5)
+The manifest engine is built, tested, and proven to enumerate EXACTLY the
+scripts daily_refresh.sh runs today (equivalence diff: 0 difference, 55
+scripts; the only change is deduping idempotent double-runs — resolves
+flag 2). weekly_refresh.sh already delegates. Before flipping the daily/
+hourly production cron, run ON THE SERVER:
+    cd .../agents/etl && python3 run_stage.py --cadence daily --dry-run
+compare the printed plan to a recent daily_refresh.sh log, then replace the
+daily/hourly shell stage-bodies with `python3 run_stage.py --cadence <c>
+--state-out .state.json` (keep the env/venv/PATH preamble and the IBKR EC2
+ssh step — the runner covers python/sql steps only).
+
+- [ ] daily/hourly cron cut over to run_stage.py after server dry-run
+
 ---
 
 ## 🚩 Flagged, deliberately not fixed
@@ -172,7 +186,7 @@ iterate DataFrames calling `cur.execute` per row — 10k+ round trips per
 daily run. `psycopg2.extras.execute_values` is a drop-in ~10–50× speedup
 and directly shrinks the daily window in which timeouts fire.
 
-### P1-5. Replace glob-sweeps with an explicit manifest
+### P1-5. Replace glob-sweeps with an explicit manifest 🟡 ENGINE DONE 2026-07-22 (`agents/etl/pipeline_manifest.json` + `run_stage.py` + CI validation; weekly_refresh.sh converted; daily/hourly shell cutover gated on a server dry-run — see below)
 `for f in bronze/yfinance/*.py` is how the double-Yahoo-ingest happened,
 how `ingest_yfinance_aux` got swept into a 120s timeout, and why the
 `# CADENCE: weekly` marker hack exists. One manifest (per stage: script,

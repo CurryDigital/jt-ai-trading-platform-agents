@@ -93,12 +93,45 @@ def main() -> int:
             n_calls += sum(1 for l in f if CALL_RE.match(l) and not l.lstrip().startswith("#"))
         all_problems.extend(check_shell(shell_rel, base_rel))
 
+    # ── Manifest validation (pipeline_manifest.json) ─────────────────────
+    manifest_path = os.path.join(REPO, "agents", "etl", "pipeline_manifest.json")
+    n_steps = 0
+    if os.path.isfile(manifest_path):
+        import json
+        VALID_STAGES = {"bronze", "silver", "gold", "consumption"}
+        VALID_CADENCES = {"daily", "hourly", "weekly"}
+        etl_base = os.path.join(REPO, "agents", "etl")
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        steps = manifest.get("steps", [])
+        n_steps = len(steps)
+        seen = set()
+        for i, s in enumerate(steps):
+            loc = f"pipeline_manifest.json[{i}] {s.get('name','?')!r}"
+            for req in ("name", "script", "stage", "cadence", "timeout"):
+                if req not in s:
+                    all_problems.append(f"{loc}: missing required field {req!r}")
+            if s.get("stage") not in VALID_STAGES:
+                all_problems.append(f"{loc}: bad stage {s.get('stage')!r}")
+            if s.get("cadence") not in VALID_CADENCES:
+                all_problems.append(f"{loc}: bad cadence {s.get('cadence')!r}")
+            script = s.get("script", "")
+            if not os.path.isfile(os.path.join(etl_base, script)):
+                all_problems.append(f"{loc}: script not found ({script})")
+            elif os.path.splitext(script)[1] not in (".py", ".sql"):
+                all_problems.append(f"{loc}: script must be .py or .sql ({script})")
+            key = (s.get("cadence"), s.get("stage"), s.get("name"))
+            if key in seen:
+                all_problems.append(f"{loc}: duplicate (cadence,stage,name) {key}")
+            seen.add(key)
+
     if all_problems:
         print(f"❌ {len(all_problems)} pipeline reference problem(s):")
         for p in all_problems:
             print(f"  {p}")
         return 1
-    print(f"✅ pipeline references OK ({n_calls} run_* calls across {len(CHECKED_SHELLS)} shells)")
+    print(f"✅ pipeline references OK ({n_calls} run_* calls across "
+          f"{len(CHECKED_SHELLS)} shells; {n_steps} manifest steps)")
     return 0
 
 
