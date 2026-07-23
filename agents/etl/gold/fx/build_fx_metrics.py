@@ -88,8 +88,20 @@ SELECT
 FROM with_indicators
 
 ON CONFLICT (ticker, date) DO UPDATE SET
+  open            = EXCLUDED.open,
+  high            = EXCLUDED.high,
+  low             = EXCLUDED.low,
   close_price     = EXCLUDED.close_price,
   log_return      = EXCLUDED.log_return,
+  sma_5           = EXCLUDED.sma_5,
+  sma_20          = EXCLUDED.sma_20,
+  sma_50          = EXCLUDED.sma_50,
+  rsi_14          = EXCLUDED.rsi_14,
+  macd_line       = EXCLUDED.macd_line,
+  macd_signal     = EXCLUDED.macd_signal,
+  macd_histogram  = EXCLUDED.macd_histogram,
+  bollinger_width = EXCLUDED.bollinger_width,
+  atr_14          = EXCLUDED.atr_14,
   volatility_20d  = EXCLUDED.volatility_20d,
   market_regime   = EXCLUDED.market_regime;
 """

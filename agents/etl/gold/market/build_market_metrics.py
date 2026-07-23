@@ -141,9 +141,20 @@ SELECT
   NOW()
 FROM latest_us u, latest_vix v
 ON CONFLICT (market, date) DO UPDATE SET
-  rating   = EXCLUDED.rating,
-  score    = EXCLUDED.score,
-  vix_level = EXCLUDED.vix_level;
+  rating             = EXCLUDED.rating,
+  score              = EXCLUDED.score,
+  bull_percentage    = EXCLUDED.bull_percentage,
+  bear_percentage    = EXCLUDED.bear_percentage,
+  index_change_score = EXCLUDED.index_change_score,
+  breadth_score      = EXCLUDED.breadth_score,
+  technical_score    = EXCLUDED.technical_score,
+  vix_score          = EXCLUDED.vix_score,
+  index_change_pct   = EXCLUDED.index_change_pct,
+  advancing_pct      = EXCLUDED.advancing_pct,
+  above_ma50_pct     = EXCLUDED.above_ma50_pct,
+  rsi_avg            = EXCLUDED.rsi_avg,
+  vix_level          = EXCLUDED.vix_level,
+  created_at         = NOW();
 """
 
 def run():

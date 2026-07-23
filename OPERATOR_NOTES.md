@@ -211,15 +211,12 @@ the double-run). Fixed so far:
   the signal path; also unblocks the corrected silver MACD/RSI propagating.
 - `gold/market/build_market_metrics.py` → index_metrics (5/32 → all 32).
 
-Metric tables STILL to complete (pure (key,date) metric rows — safe to refresh
-all computed columns; do each with the column-match verify):
-- `build_crypto_kpis.py`      → crypto_kpis        (79/88 unrefreshed)
-- `build_fx_metrics.py`       → fx_metrics         (54/58; also NULL macd/rsi)
-- `build_commodity_metrics.py`→ commodity_futures  (46/52)
-- `build_stock_metrics_history.py` → stock_metrics_history (32/37)
-- `build_market_metrics.py`   → market_sentiment_daily (15/18)
+All metric-table upserts completed 2026-07-22 (column-match verified each):
+kpis_metrics, index_metrics, crypto_kpis, stock_metrics_history,
+commodity_futures, market_sentiment_daily, fx_metrics.
+STILL to do (lower priority):
 - `build_earnings_signals.py` → sue_scores         (4/8)
-- `build_ipo_data.py`         → hk_ipo_* (reference data; lower priority)
+- `build_ipo_data.py`         → hk_ipo_* (reference data)
 
 Do NOT blanket-refresh the LEDGER/state tables — their partial update is
 INTENTIONAL (rewriting an open position's entry_price/entry_date would corrupt
