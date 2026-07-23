@@ -24,7 +24,14 @@ from datetime import datetime, timedelta, date, timezone
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
-import psycopg2
+# 2026-07-22: use the shared DB pool instead of a local psycopg2 connect with a
+# HARDCODED PLAINTEXT PASSWORD fallback (removed — never commit credentials).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ETL_SHARED = os.path.normpath(os.path.join(_HERE, '..', '..', 'shared', 'scripts'))
+if _ETL_SHARED not in sys.path:
+    sys.path.insert(0, _ETL_SHARED)
+os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
+from db import get_connection
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,24 +41,20 @@ logger = logging.getLogger(__name__)
 
 STRATEGY_ID = "ETF_US_Sector_Relative_Momentum"
 TOP_N = 3
+# 2026-07-22: lookbacks are CALENDAR days (fetch_closest_price finds the close
+# on-or-before target_date). The old values (21/63/126/252) were trading-day
+# counts used as calendar-day deltas, so "1m" was really ~15 trading days and
+# "12m" ~8.3 months — every momentum window was materially wrong.
 LOOKBACKS = {
-    "1m": 21,
-    "3m": 63,
-    "6m": 126,
-    "12m": 252,
-}
-
-DB_CONFIG = {
-    "host": os.environ.get("RDS_HOST", "openclaw.cjs04usueagu.ap-southeast-1.rds.amazonaws.com"),
-    "dbname": os.environ.get("RDS_DB", "aitrading"),
-    "user": os.environ.get("RDS_USER", "openclaw_user"),
-    "password": os.environ.get("RDS_PASSWORD", "NewStrongPasswordHere12"),
-    "port": int(os.environ.get("RDS_PORT", "5432")),
+    "1m": 30,
+    "3m": 91,
+    "6m": 182,
+    "12m": 365,
 }
 
 
 def connect():
-    return psycopg2.connect(**DB_CONFIG)
+    return get_connection()
 
 
 @dataclass
@@ -63,16 +66,18 @@ class MomentumRow:
 
 
 def fetch_universe(cur) -> List[str]:
+    # 2026-07-22: read the universe from gold.strategy_registry.universe_tickers
+    # (the source of truth), not from gold.strategy_ticker_scores — the table
+    # this script WRITES. The old self-referential read returned empty on any
+    # first run or after a truncate, silently disabling the strategy.
     cur.execute(
-        """
-        SELECT DISTINCT ticker
-        FROM gold.strategy_ticker_scores
-        WHERE strategy_id = %s
-        ORDER BY ticker;
-        """,
+        "SELECT universe_tickers FROM gold.strategy_registry WHERE strategy_id = %s",
         (STRATEGY_ID,),
     )
-    return [r[0] for r in cur.fetchall()]
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return []
+    return sorted(t for t in row[0] if t and t != 'CASH')
 
 
 def fetch_closest_price(cur, ticker: str, target_date: date) -> Optional[float]:

@@ -166,6 +166,51 @@ Three scripts from the 2026-07-22 drop (now quarantined in
 
 ---
 
+## 🐞 Signal-correctness bugs found & fixed (2026-07-22 internal review)
+
+Deep read of the actual signal-generation MATH (not process/plumbing) — the
+root causes of "buy signals / metrics / backtest figures missing". Fixed in
+code; each needs a real-DB run to take effect (indicators must recompute, then
+the scorers re-run).
+
+### S1. Technical indicators were NULL / SMA-not-EMA / 30-day window (ROOT CAUSE)
+`silver/compute_technical_indicators.py` (rewritten):
+- `rsi_14`, `macd_signal`, `macd_histogram`, `atr_14` were hardcoded `NULL`.
+  build_equity_kpis copies these into gold.kpis_metrics, so **macd_histogram
+  was NULL everywhere** — every MACD criterion (S9's `macd_histogram >= 0.1`,
+  cond_macd_bullish, s012_tech_momentum) silently never fired. Biggest reason
+  MACD strategies showed all-HOLD.
+- `ema_12`/`ema_26`/`macd_line` used AVG() = SMA, not EMA.
+- 30-day load window made `sma_50`/`sma_200` impossible (~21 rows for a
+  "200-day" average) → cond_above_sma200, golden/death cross, price_vs_sma200
+  all wrong.
+- ON CONFLICT didn't refresh macd_*/ema_*/rsi_14/volume_ratio → stale on re-run.
+Now: pure-Python `shared/scripts/indicators.py` (Wilder RSI/ATR, EMA MACD),
+unit-tested (`tests/test_indicators.py`, 7/7, incl. Wilder RSI vs classic
+~70.5), 420-day warmup, recent-tail write, full-column ON CONFLICT.
+
+### S2. S9 recomputed MACD with SMA (divergent 2nd definition)
+`s9_macd_daily.py::find_signals` now reads macd_histogram/volume_ratio from
+gold.kpis_metrics — one MACD definition, consistent with the criteria scorer.
+
+### S3. ETF relative-momentum: 3 bugs
+`gold/strategy/calc_etf_relative_momentum.py`:
+- HARDCODED PLAINTEXT DB PASSWORD in source → now uses shared db.py.
+- Lookbacks used trading-day counts (21/63/126/252) as calendar-day deltas
+  ("1m" ≈ 15 trading days, "12m" ≈ 8.3 months) → now 30/91/182/365 calendar.
+- fetch_universe read from the output table (strategy_ticker_scores), empty
+  after any truncate → now reads strategy_registry.universe_tickers.
+
+### Still open (found, not fixed — needs decisions)
+- `build_strategy_scores` only scores strategies with strategy_signal_criteria
+  rows; most registry strategies have none, so they depend on file-ingest or a
+  dedicated calculator. Ones with neither are all-HOLD by construction — use
+  `tools/audit_strategy_consistency.py` to see each strategy's mechanism.
+- rebalancer publishes `signal_strength == confidence_score` (both score/100)
+  — meaningless duplication; confidence should measure something distinct.
+
+---
+
 ## 🔭 Optimization backlog (from the 2026-07-10 full etl+signals review)
 
 Ordered by impact. P0 = prevents the bug classes we actually hit this month.
