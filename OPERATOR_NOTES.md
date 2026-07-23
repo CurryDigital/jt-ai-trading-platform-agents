@@ -201,6 +201,38 @@ gold.kpis_metrics — one MACD definition, consistent with the criteria scorer.
 - fetch_universe read from the output table (strategy_ticker_scores), empty
   after any truncate → now reads strategy_registry.universe_tickers.
 
+### S4. Incomplete ON CONFLICT across gold builders (systemic — every re-run)
+Most gold builders re-insert a rolling window (last 14–90 days) each run, so
+they hit ON CONFLICT for all but the newest date. Their DO UPDATE clauses
+refresh only a handful of the inserted columns, so recomputed indicators and
+derived flags stay STALE on ~13 of every 14 dates (and on same-day re-runs /
+the double-run). Fixed so far:
+- `gold/equity/build_equity_kpis.py` → kpis_metrics (9/56 → all 56). ROOT of
+  the signal path; also unblocks the corrected silver MACD/RSI propagating.
+- `gold/market/build_market_metrics.py` → index_metrics (5/32 → all 32).
+
+Metric tables STILL to complete (pure (key,date) metric rows — safe to refresh
+all computed columns; do each with the column-match verify):
+- `build_crypto_kpis.py`      → crypto_kpis        (79/88 unrefreshed)
+- `build_fx_metrics.py`       → fx_metrics         (54/58; also NULL macd/rsi)
+- `build_commodity_metrics.py`→ commodity_futures  (46/52)
+- `build_stock_metrics_history.py` → stock_metrics_history (32/37)
+- `build_market_metrics.py`   → market_sentiment_daily (15/18)
+- `build_earnings_signals.py` → sue_scores         (4/8)
+- `build_ipo_data.py`         → hk_ipo_* (reference data; lower priority)
+
+Do NOT blanket-refresh the LEDGER/state tables — their partial update is
+INTENTIONAL (rewriting an open position's entry_price/entry_date would corrupt
+the trade record):
+- `rebuild_paper_positions.py` → paper_trades_synthetic (entry_* immutable)
+- `build_portfolio_snapshot.py` → ibkr_positions_live
+
+### Also still NULL (same class as S1, different tables)
+- `build_fx_metrics.py` and `build_market_metrics.py`(index) hardcode
+  macd_signal/macd_histogram (and FX rsi_14) to NULL and use AVG()=SMA. No
+  signal reads fx_metrics today, but any FX/index MACD criterion would be
+  dead. Port to shared/scripts/indicators.py when those strategies go live.
+
 ### Still open (found, not fixed — needs decisions)
 - `build_strategy_scores` only scores strategies with strategy_signal_criteria
   rows; most registry strategies have none, so they depend on file-ingest or a

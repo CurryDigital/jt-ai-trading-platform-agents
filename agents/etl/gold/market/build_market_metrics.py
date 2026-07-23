@@ -60,13 +60,44 @@ FROM silver.market_indices m
 WHERE m.date >= CURRENT_DATE - INTERVAL '14 days'
 WINDOW w AS (PARTITION BY m.ticker ORDER BY m.date)
 
+-- 2026-07-22: refresh every computed non-key column on conflict. The daily
+-- run re-inserts the last 14 days, so the old 5-column update left ma_50/200,
+-- rsi_14, returns_*, 52w range, volatility etc. stale on ~13 of every 14
+-- dates. index_metrics is a pure (ticker,date) metric table — all recomputed.
 ON CONFLICT (ticker, date) DO UPDATE SET
-  close         = EXCLUDED.close,
-  change_pct    = EXCLUDED.change_pct,
-  above_ma_50   = EXCLUDED.above_ma_50,
-  above_ma_200  = EXCLUDED.above_ma_200,
-  golden_cross  = EXCLUDED.golden_cross,
-  created_at    = NOW();
+  name                  = EXCLUDED.name,
+  market                = EXCLUDED.market,
+  region                = EXCLUDED.region,
+  currency              = EXCLUDED.currency,
+  open                  = EXCLUDED.open,
+  high                  = EXCLUDED.high,
+  low                   = EXCLUDED.low,
+  close                 = EXCLUDED.close,
+  volume                = EXCLUDED.volume,
+  change_pct            = EXCLUDED.change_pct,
+  change_amount         = EXCLUDED.change_amount,
+  ytd_change            = EXCLUDED.ytd_change,
+  ma_50                 = EXCLUDED.ma_50,
+  ma_200                = EXCLUDED.ma_200,
+  above_ma_50           = EXCLUDED.above_ma_50,
+  above_ma_200          = EXCLUDED.above_ma_200,
+  golden_cross          = EXCLUDED.golden_cross,
+  rsi_14                = EXCLUDED.rsi_14,
+  macd_line             = EXCLUDED.macd_line,
+  macd_signal           = EXCLUDED.macd_signal,
+  macd_hist             = EXCLUDED.macd_hist,
+  atr_14                = EXCLUDED.atr_14,
+  _52_week_high         = EXCLUDED._52_week_high,
+  _52_week_low          = EXCLUDED._52_week_low,
+  _52_week_range_pct    = EXCLUDED._52_week_range_pct,
+  returns_1d            = EXCLUDED.returns_1d,
+  returns_5d            = EXCLUDED.returns_5d,
+  returns_21d           = EXCLUDED.returns_21d,
+  returns_63d           = EXCLUDED.returns_63d,
+  returns_252d          = EXCLUDED.returns_252d,
+  volatility_21d        = EXCLUDED.volatility_21d,
+  is_volatility_index   = EXCLUDED.is_volatility_index,
+  created_at            = NOW();
 """
 
 SQL_SENTIMENT = """
