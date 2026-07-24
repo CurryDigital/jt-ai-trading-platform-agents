@@ -13,7 +13,7 @@ CI enforces coverage. **Next:** run the generator against prod to create the
 ~34 semantic-strategy docs, then enrich each `signal_logic`/`exit_logic` in the
 registry so the generated docs are meaningful.
 
-## G2. One signal path per strategy (kill the mechanism sprawl)
+## G2. One signal path per strategy (kill the mechanism sprawl) 🟡 STARTED 2026-07-22 (migration 010: signal_mechanism column + v_strategy_mechanism_audit; docs/generator wired. Operator: apply 010, resolve none/multiple)
 Today a strategy's BUY can come from criteria, a dedicated calculator, a
 signal-file ingest, or two of those at once (S9 has both). Make each strategy
 declare exactly ONE mechanism in the registry (`signal_mechanism` column), and

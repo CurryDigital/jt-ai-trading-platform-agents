@@ -30,6 +30,12 @@ are exactly a few signal mechanisms — each has ONE generic implementation:
   (one scan, all files; unknown strategies reported, never invented).
 Adding a strategy = a registry row + (criteria rows | a signal file). No code.
 
+*Enforced by:* `gold.strategy_registry.signal_mechanism` (migration 010,
+CHECK ∈ {criteria, computed, ingested, none}) — exactly ONE per strategy.
+`gold.v_strategy_mechanism_audit` flags the two failures the old sprawl hid:
+`none` (no working path → all-HOLD) and `multiple` (two writers can disagree,
+e.g. S9 had criteria AND s9_macd_daily).
+
 ### 3. Data flows one direction
 bronze → silver → gold → consumption; backtest_runs → registry → UI. Never
 backwards. `backfill_etf_win_rate_oos.py` (registry → backtest_runs) is the

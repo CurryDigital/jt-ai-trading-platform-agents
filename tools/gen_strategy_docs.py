@@ -38,11 +38,23 @@ def _authored(path):
 
 
 def _mechanism(reg, criteria_ids, sid):
-    if reg.get("signal_file_path"):
-        return f"ingested(`{reg['signal_file_path']}`)"
-    if sid in criteria_ids:
+    # Prefer the declared signal_mechanism (migration 010) — the single source
+    # of truth — falling back to evidence when the column isn't set yet.
+    declared = reg.get("signal_mechanism")
+    if declared == "ingested":
+        return f"ingested(`{reg.get('signal_file_path') or '?'}`)"
+    if declared == "criteria":
         return "criteria(`gold.strategy_signal_criteria`)"
-    return "computed (see registry.signal_logic / a dedicated calculator)"
+    if declared == "computed":
+        return "computed (dedicated calculator)"
+    if declared == "none":
+        return "**none — NO working signal path (all-HOLD; wire a mechanism)**"
+    # unset: infer + warn
+    if reg.get("signal_file_path"):
+        return f"ingested(`{reg['signal_file_path']}`) _(mechanism not declared — run migration 010)_"
+    if sid in criteria_ids:
+        return "criteria _(mechanism not declared — run migration 010)_"
+    return "_undeclared — run migration 010 + resolve in v_strategy_mechanism_audit_"
 
 
 def render(reg, crit_rows, run, criteria_ids):
@@ -127,9 +139,18 @@ def main():
     conn = get_connection()
     cur = conn.cursor()
 
+    # signal_mechanism exists only after migration 010 — select it only if present.
     cur.execute("""
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='gold' AND table_name='strategy_registry'
+          AND column_name='signal_mechanism'
+    """)
+    has_mech = cur.fetchone() is not None
+    mech_col = ", signal_mechanism" if has_mech else ", NULL::varchar AS signal_mechanism"
+    cur.execute(f"""
         SELECT strategy_id, name, asset_class, status, priority, execution_mode,
                frequency, universe_tickers, signal_logic, exit_logic, signal_file_path
+               {mech_col}
         FROM gold.strategy_registry WHERE retired_at IS NULL ORDER BY strategy_id
     """)
     cols = [d[0] for d in cur.description]

@@ -20,6 +20,18 @@ strategy entries). Details: `agents/signals/pipeline/README.md`.
 
 - [ ] pipeline_b_signals.sh updated on server
 
+### 1d. Apply migration 010 + resolve strategy signal-mechanism (ROADMAP G2)
+Migration 010 adds gold.strategy_registry.signal_mechanism and
+gold.v_strategy_mechanism_audit. After applying, run:
+    SELECT * FROM gold.v_strategy_mechanism_audit WHERE verdict <> 'ok';
+- verdict='none'   → strategy has NO signal path (all-HOLD forever). Wire a
+  mechanism (criteria rows / signal file / a calculator) or retire it.
+- verdict='multiple' → two writers (e.g. S9 = criteria AND s9_macd_daily.py).
+  Pick ONE: either drop the criteria rows (let the calculator own it) or make
+  the calculator exit-only. Then set signal_mechanism explicitly.
+The migration auto-sets only the unambiguous 'ok' strategies; none/multiple
+are left for this decision (never silently picked).
+
 ### 1b. Cut daily/hourly refresh over to run_stage.py (P1-5)
 The manifest engine is built, tested, and proven to enumerate EXACTLY the
 scripts daily_refresh.sh runs today (equivalence diff: 0 difference, 55
