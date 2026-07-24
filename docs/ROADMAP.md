@@ -28,7 +28,7 @@ and add a DB-level check that no strategy criterion references a column that is
 >50% NULL in `gold.kpis_metrics` (that check would have caught the dead
 macd_histogram months earlier).
 
-## G4. Finish the honest-upsert sweep + make it un-regressable
+## G4. Finish the honest-upsert sweep + make it un-regressable ✅ DONE 2026-07-22
 Complete the remaining metric-table `ON CONFLICT`s (sue_scores, hk_ipo_*), then
 add a CI check that any `INSERT ... ON CONFLICT DO UPDATE` on a `(key,date)`
 metric table refreshes every non-key column (ledger tables allow-listed). This

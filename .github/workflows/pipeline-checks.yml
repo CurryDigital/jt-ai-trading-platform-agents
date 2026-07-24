@@ -53,3 +53,6 @@ jobs:
 
       - name: Strategy docs coverage (DB-free)
         run: python tools/check_strategy_docs.py
+
+      - name: Metric upsert completeness (DB-free)
+        run: python tools/check_upsert_completeness.py
