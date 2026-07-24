@@ -8,6 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared", "scripts"))
 from indicators import ema, sma, rsi, atr, macd, rolling_std
+from price_indicators import indicator_rows
 
 
 def approx(a, b, tol=1e-6):
@@ -77,6 +78,49 @@ def test_none_handling():
     # Leading None (insufficient history) must not crash and must not fabricate.
     assert ema([None, None, 5.0], 3)[-1] == 5.0
     assert sma([None, 1.0, 2.0], 5)[-1] is None
+
+
+def test_price_indicator_rows_shape_and_warmup():
+    # Two tickers, 120 daily bars each; indicator_rows groups by ticker and
+    # returns (ticker, date, rsi, macd_line, macd_signal, macd_hist, atr).
+    from datetime import date, timedelta
+    d0 = date(2025, 1, 1)
+    rows = []
+    for t in ("AAA", "BBB"):
+        for i in range(120):
+            c = 100 + (i * 0.2) + (i % 4)
+            rows.append((t, d0 + timedelta(days=i), c + 0.5, c - 0.5, c))
+    out = indicator_rows(rows)
+    assert len(out) == 240, len(out)
+    tickers = {r[0] for r in out}
+    assert tickers == {"AAA", "BBB"}, tickers
+    # last row of each ticker is fully populated after 120-bar warmup
+    last_bbb = [r for r in out if r[0] == "BBB"][-1]
+    assert all(v is not None for v in last_bbb[2:]), last_bbb
+    # tuple = (ticker, date, rsi, macd_line, macd_signal, macd_hist, atr):
+    # histogram (idx 5) == line (idx 3) - signal (idx 4)
+    assert approx(last_bbb[5], last_bbb[3] - last_bbb[4]), last_bbb
+
+
+def test_price_indicator_rows_write_cutoff():
+    # write_cutoff drops warmup rows from the payload but still uses them.
+    from datetime import date, timedelta
+    d0 = date(2025, 1, 1)
+    rows = [("AAA", d0 + timedelta(days=i), None, None, 100 + i * 0.3) for i in range(60)]
+    cutoff = d0 + timedelta(days=50)
+    out = indicator_rows(rows, write_cutoff=cutoff)
+    assert out and all(r[1] >= cutoff for r in out), [r[1] for r in out[:3]]
+    # high/low fell back to close (no crash), atr still computes with 60 bars
+    assert out[-1][6] is not None, out[-1]
+
+
+def test_price_indicator_rows_skips_missing_close():
+    from datetime import date, timedelta
+    d0 = date(2025, 1, 1)
+    rows = [("AAA", d0 + timedelta(days=i), None, None, None if i == 3 else 100.0 + i)
+            for i in range(30)]
+    # a None close anywhere in the ticker's series skips it (no fabrication)
+    assert indicator_rows(rows) == []
 
 
 def _main():

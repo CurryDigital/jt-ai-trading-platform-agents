@@ -32,6 +32,22 @@ gold.v_strategy_mechanism_audit. After applying, run:
 The migration auto-sets only the unambiguous 'ok' strategies; none/multiple
 are left for this decision (never silently picked).
 
+### 1e. Post-refresh indicator/criteria health checks (ROADMAP G3)
+After a gold refresh (which now runs the FX/index stage-2 indicator fill), run
+against prod to confirm no BUY criterion points at a dead (mostly-NULL) column
+— the check that would have caught the killed macd_histogram:
+    python3 tools/check_criteria_columns.py       # exit 1 => a criterion column is >50% NULL
+Also spot-check the newly-filled indicators are populated (not NULL):
+    SELECT COUNT(*) FILTER (WHERE macd_histogram IS NOT NULL) AS nn, COUNT(*)
+      FROM gold.fx_metrics WHERE date > CURRENT_DATE - 30;
+    SELECT COUNT(*) FILTER (WHERE macd_hist IS NOT NULL) AS nn, COUNT(*)
+      FROM gold.index_metrics WHERE date > CURRENT_DATE - 30;
+Note: the stage-2 fill reads a 420-day warmup back from the gold table itself,
+so on a table with <~30 days of history macd/atr stay NULL by design (never
+fabricated) until enough history accumulates.
+
+- [ ] check_criteria_columns.py green on prod after a full refresh
+
 ### 1b. Cut daily/hourly refresh over to run_stage.py (P1-5)
 The manifest engine is built, tested, and proven to enumerate EXACTLY the
 scripts daily_refresh.sh runs today (equivalence diff: 0 difference, 55

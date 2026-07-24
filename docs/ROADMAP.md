@@ -21,12 +21,17 @@ have `run_signal_cycle.sh` dispatch on it. Then `audit_strategy_consistency.py`
 becomes a hard gate: every non-retired strategy must have a working mechanism
 or it's flagged, not silently all-HOLD.
 
-## G3. Indicator correctness as a contract
-`indicators.py` is now the one true source for RSI/MACD/ATR. Route the FX and
-index metric builders through it too (they still emit NULL macd / SMA-as-EMA),
-and add a DB-level check that no strategy criterion references a column that is
->50% NULL in `gold.kpis_metrics` (that check would have caught the dead
-macd_histogram months earlier).
+## G3. Indicator correctness as a contract ✅ DONE 2026-07-24
+`indicators.py` is the one true source for RSI/MACD/ATR. The FX
+(`build_fx_metrics.py`) and index (`build_market_metrics.py`) builders now route
+through it via `shared/scripts/price_indicators.py` (a stage-2 fill), instead of
+emitting NULL macd_signal/macd_histogram/atr_14 and macd_line as an SMA
+difference — so silver, FX and index agree on the math (unit-tested in
+`test_indicators.py`). `tools/check_criteria_columns.py` is the DB-level guard:
+it fails if any BUY criterion references a `gold.kpis_metrics` column that is
+>50% NULL over the latest-per-ticker rows the scorer evaluates — the check that
+would have caught the dead macd_histogram months earlier. It needs DB access, so
+it runs against prod (OPERATOR_NOTES flag), not in the DB-free CI gate.
 
 ## G4. Finish the honest-upsert sweep + make it un-regressable ✅ DONE 2026-07-22
 Complete the remaining metric-table `ON CONFLICT`s (sue_scores, hk_ipo_*), then
