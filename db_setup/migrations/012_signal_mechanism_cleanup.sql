@@ -22,9 +22,10 @@
 --       no backtest_runs — dead rows.
 --     * earnings_vol_crush_carry + the 3 US_STK_* appear in the remediation /
 --       oos-backfill scripts (real intent), they just have no signal wired yet.
---     So auto-retire ONLY a 'none' strategy with a genuinely empty footprint —
---     no universe, no backtest run, no ticker scores — evaluated in SQL so the
---     DB picks, not a hardcoded list. Everything with any footprint is left
+--     So auto-retire ONLY a 'none' strategy with no research/live footprint —
+--     no backtest run and no ticker scores (a bare universe_tickers watchlist is
+--     NOT footprint; the COMM_* have one yet are otherwise inert) — evaluated in
+--     SQL so the DB picks, not a hardcoded list. Anything with a backtest is left
 --     'none' and flagged for wiring. Reversible: NULL retired_at to restore.
 --
 -- Idempotent. Safe to re-run (retired rows drop out of the audit view, and the
@@ -84,16 +85,23 @@ FROM ev;
 
 GRANT SELECT ON gold.v_strategy_mechanism_audit TO openclaw_user;
 
--- (2b) Auto-retire ONLY the zero-footprint 'none' orphans (the DB decides which).
+-- (2b) Auto-retire ONLY the inert 'none' orphans (the DB decides which).
+-- Footprint = research/live evidence: a BACKTEST RUN or LIVE TICKER SCORES. A
+-- bare universe_tickers list is NOT evidence — it is just a watchlist and every
+-- half-onboarded row has one (the 3 COMM_* carry a universe but have no
+-- backtest, no scores, no mechanism, and zero references anywhere in the repo;
+-- OPERATOR_NOTES flag 5 documents their stats as fabricated outside the sync).
+-- So gate on has_backtest + scores, NOT on has_universe. This retires the
+-- COMM_* orphans while sparing earnings_vol_crush_carry + the US_STK_* (all of
+-- which have a backtest run = real but unwired, left for G6). Reversible.
 UPDATE gold.strategy_registry r
 SET retired_at = NOW(),
-    retirement_reason = 'G2/012 auto-retire: no signal mechanism and empty footprint '
-                        '(no universe, no backtest run, no ticker scores). Orphan row. '
+    retirement_reason = 'G2/012 auto-retire: no signal mechanism, no backtest run, '
+                        'no ticker scores (bare universe only). Orphan row. '
                         'Reversible: SET retired_at=NULL, retirement_reason=NULL to restore.'
 FROM gold.v_strategy_mechanism_audit a
 WHERE r.strategy_id = a.strategy_id
   AND a.verdict = 'none'
-  AND NOT a.has_universe
   AND NOT a.has_backtest
   AND r.retired_at IS NULL
   AND NOT EXISTS (SELECT 1 FROM gold.strategy_ticker_scores s WHERE s.strategy_id = r.strategy_id);

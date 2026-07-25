@@ -56,10 +56,12 @@ UPDATE 2026-07-24 — migration 012 finishes the cleanup (apply after 011):
     psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db_setup/migrations/012_signal_mechanism_cleanup.sql
   * Clears the stale signal_file_path on the 2 computed ETFs -> evidence_conflict 0.
   * Adds has_universe/has_backtest to the audit view, then AUTO-RETIRES only the
-    zero-footprint 'none' orphans (no universe AND no backtest AND no ticker
-    scores — the DB picks, expected: the 3 COMM_* rows). Reversible via
-    retired_at=NULL. The remaining 'none' (earnings_vol_crush_carry, the 3
-    US_STK_*) have real footprint and stay flagged for wiring (G6).
+    inert 'none' orphans: no backtest run AND no ticker scores (a bare
+    universe_tickers watchlist is NOT footprint — the 3 COMM_* carry a universe
+    yet have no backtest, no scores, no mechanism, and zero repo references).
+    The DB picks; expected the 3 COMM_*. Reversible via retired_at=NULL. The
+    remaining 'none' (earnings_vol_crush_carry + the 3 US_STK_*) all have a
+    backtest run = real but unwired, left flagged for wiring (G6).
   Verify:  SELECT strategy_id, retirement_reason FROM gold.strategy_registry WHERE retirement_reason LIKE 'G2/012%';
            SELECT strategy_id, has_universe, has_backtest FROM gold.v_strategy_mechanism_audit WHERE verdict='none';
 
