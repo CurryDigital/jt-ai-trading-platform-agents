@@ -46,7 +46,25 @@ Note: the stage-2 fill reads a 420-day warmup back from the gold table itself,
 so on a table with <~30 days of history macd/atr stay NULL by design (never
 fabricated) until enough history accumulates.
 
+Prod test 2026-07-25 (hermes) findings:
+- gold.index_metrics: macd_hist/atr_14 went 0/224 -> 224/224 after re-running
+  build_market_metrics.py. G3 fill proven end-to-end on real data.
+- gold.fx_metrics: last row is 2026-06-17, so nothing in the 30-day window —
+  the fill wrote 255 historical rows correctly but bronze.fx_prices ingestion
+  is STALE (~5 weeks). Not a builder bug; a data-feed gap (see flag 7 below).
+- check_criteria_columns.py FAILED (exit 1): gold.kpis_metrics.macd_histogram
+  is 99.4% NULL over 924 tickers. EXPECTED until the *equity* path is re-run:
+  the S1 fix lives in silver/compute_technical_indicators.py ->
+  gold/equity/build_equity_kpis.py, neither of which has run on prod since the
+  fix. Reviving macd_histogram (and every MACD BUY) requires, in order:
+      cd agents/etl
+      python3 silver/compute_technical_indicators.py   # writes silver.technical_indicators
+      python3 gold/equity/build_equity_kpis.py          # copies macd_histogram -> gold.kpis_metrics
+      python3 ../signals/pipeline/build_strategy_scores.py   # HOLD->BUY revival
+  then re-run tools/check_criteria_columns.py (expect green).
+
 - [ ] check_criteria_columns.py green on prod after a full refresh
+- [ ] silver indicators + equity kpis re-run so kpis_metrics.macd_histogram lives
 
 ### 1b. Cut daily/hourly refresh over to run_stage.py (P1-5)
 The manifest engine is built, tested, and proven to enumerate EXACTLY the
@@ -190,6 +208,16 @@ Three scripts from the 2026-07-22 drop (now quarantined in
        Frontend fix = compute Live WR from consumption.strategies_trades_
        history WHERE status='closed' (migration 008 exposes status), NOT
        from execution_fills_real (which stays empty until real fills exist).
+
+### 7. bronze.fx_prices ingestion is stale (found 2026-07-25 prod test)
+gold.fx_metrics' latest row is 2026-06-17 — ~5 weeks stale as of the test.
+The G3 stage-2 fill wrote 255 historical FX rows correctly, but there is no
+recent data to indicate: bronze.fx_prices (and/or bronze.ibkr_fx_bars) isn't
+being updated by the ingestion job. This is a data-feed gap, not a builder
+bug — the FX MACD/ATR columns will populate for recent dates automatically
+once the feed resumes. Diagnose the FX ingestion cron / IBKR FX bar puller.
+
+- [ ] FX price ingestion confirmed running (bronze.fx_prices fresh) or gap explained
 
 
 ---
