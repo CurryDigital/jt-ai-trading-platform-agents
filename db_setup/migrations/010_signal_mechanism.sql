@@ -38,19 +38,24 @@ BEGIN
     END IF;
 END $$;
 
--- Strategies whose BUY logic lives in a dedicated CALCULATOR (code, not data).
--- This is the one place that list is written down; keep it in sync with the
--- scripts under agents/signals/pipeline + agents/etl/gold/strategy.
-CREATE TEMP TABLE _computed(strategy_id text) ON COMMIT DROP;
-INSERT INTO _computed VALUES
-    ('S9_MACD_Momentum_V2'),
-    ('ETF_US_Sector_Relative_Momentum'),
-    ('ETF_Multi_Asset_Tactical_Allocation'),
-    ('ETF_Covered_Call_Income_Rotation');
-
 -- Per-strategy evidence + a health verdict.
+--
+-- The list of strategies whose BUY logic lives in a dedicated CALCULATOR (code,
+-- not data) is inlined as a VALUES CTE *inside* the view. It cannot be a TEMP
+-- TABLE: under psql autocommit an `ON COMMIT DROP` temp table is gone before the
+-- next statement, and a permanent view in the gold schema may not reference a
+-- temporary relation at all. This CTE is the one place that list is written
+-- down; keep it in sync with the scripts under agents/signals/pipeline +
+-- agents/etl/gold/strategy.
 CREATE OR REPLACE VIEW gold.v_strategy_mechanism_audit AS
-WITH ev AS (
+WITH _computed(strategy_id) AS (
+    VALUES
+        ('S9_MACD_Momentum_V2'),
+        ('ETF_US_Sector_Relative_Momentum'),
+        ('ETF_Multi_Asset_Tactical_Allocation'),
+        ('ETF_Covered_Call_Income_Rotation')
+),
+ev AS (
     SELECT
         r.strategy_id,
         r.name,
