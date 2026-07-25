@@ -23,10 +23,12 @@ S9=criteria (s9_macd_daily is a separate paper tracker), US_Sector + Covered_Cal
 = computed, Multi_Asset = ingested — and fixed a wrong entry in 010's computed
 list. A declared mechanism is now authoritative in the verdict, with
 `evidence_conflict` surfacing a stale second source (e.g. an old signal_file_path)
-for later cleanup. **Operator:** apply 010 then 011; the 7 verdict='none'
-strategies still need a mechanism wired or retirement (that's G6 onboarding).
-Remaining polish: have `run_signal_cycle.sh` dispatch on `signal_mechanism`
-(today it runs every step unconditionally) — small, deferred.
+for later cleanup. Migration 012 finishes it: clears the 2 stale signal_file_paths
+(evidence_conflict → 0) and auto-retires only the zero-footprint 'none' orphans
+(no universe/backtest/scores — the 3 COMM_* rows), leaving the real-but-unwired
+'none' (earnings_vol_crush_carry, 3× US_STK_*) flagged for G6. **Operator:** apply
+010 → 011 → 012. Remaining polish: have `run_signal_cycle.sh` dispatch on
+`signal_mechanism` (today it runs every step unconditionally) — small, deferred.
 
 ## G3. Indicator correctness as a contract ✅ DONE 2026-07-24
 `indicators.py` is the one true source for RSI/MACD/ATR. The FX

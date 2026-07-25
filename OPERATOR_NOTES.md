@@ -52,9 +52,20 @@ reviewed follow-up. The 7 verdict='none' (3×COMM_*, earnings_vol_crush_carry,
 3×US_STK_*) have NO signal path — wire criteria/a calculator/a signal file, or
 retire them (ROADMAP G6). Not resolved here (per-strategy onboarding decision).
 
-- [ ] migration 011 applied; 0 'multiple' in v_strategy_mechanism_audit
-- [ ] evidence_conflict signal_file_path cleared for US_Sector + Covered_Call
-- [ ] 7 verdict='none' strategies wired or retired
+UPDATE 2026-07-24 — migration 012 finishes the cleanup (apply after 011):
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db_setup/migrations/012_signal_mechanism_cleanup.sql
+  * Clears the stale signal_file_path on the 2 computed ETFs -> evidence_conflict 0.
+  * Adds has_universe/has_backtest to the audit view, then AUTO-RETIRES only the
+    zero-footprint 'none' orphans (no universe AND no backtest AND no ticker
+    scores — the DB picks, expected: the 3 COMM_* rows). Reversible via
+    retired_at=NULL. The remaining 'none' (earnings_vol_crush_carry, the 3
+    US_STK_*) have real footprint and stay flagged for wiring (G6).
+  Verify:  SELECT strategy_id, retirement_reason FROM gold.strategy_registry WHERE retirement_reason LIKE 'G2/012%';
+           SELECT strategy_id, has_universe, has_backtest FROM gold.v_strategy_mechanism_audit WHERE verdict='none';
+
+- [ ] migrations 011 + 012 applied; 0 'multiple' and 0 evidence_conflict
+- [ ] auto-retired orphans reviewed (expected: 3 COMM_*); reversible if wrong
+- [ ] remaining verdict='none' (real, unwired) scheduled for wiring (G6)
 
 ### 1e. Post-refresh indicator/criteria health checks (ROADMAP G3)
 After a gold refresh (which now runs the FX/index stage-2 indicator fill), run
