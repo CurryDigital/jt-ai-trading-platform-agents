@@ -32,6 +32,43 @@ gold.v_strategy_mechanism_audit. After applying, run:
 The migration auto-sets only the unambiguous 'ok' strategies; none/multiple
 are left for this decision (never silently picked).
 
+UPDATE 2026-07-24 — migration 011 resolves the 4 'multiple' (evidence-based,
+traced from which script writes each strategy's strategy_ticker_scores):
+  S9_MACD_Momentum_V2               -> criteria  (s9_macd_daily writes its own
+                                                  s9_* tables, not the scores)
+  ETF_US_Sector_Relative_Momentum   -> computed  (calc_etf_relative_momentum.py)
+  ETF_Covered_Call_Income_Rotation  -> computed  (build_etf_covered_call_paper_signal.sql)
+  ETF_Multi_Asset_Tactical_Allocation -> ingested (ingest_etf_multi_asset_live_signal.py;
+                                                    paper_run only READS scores)
+011 also fixes a wrong entry in 010's computed list (S9 + Multi_Asset were
+mislabelled), makes a DECLARED mechanism authoritative in the verdict, and adds
+evidence_conflict (declared but a stale 2nd source remains). Apply 010 THEN 011:
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db_setup/migrations/010_signal_mechanism.sql
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db_setup/migrations/011_resolve_signal_mechanism.sql
+    SELECT strategy_id, declared, verdict, evidence_conflict FROM gold.v_strategy_mechanism_audit ORDER BY verdict, strategy_id;
+After 011: 0 'multiple'. evidence_conflict flags US_Sector + Covered_Call — clear
+their stale gold.strategy_registry.signal_file_path (read by NO live code) in a
+reviewed follow-up. The 7 verdict='none' (3×COMM_*, earnings_vol_crush_carry,
+3×US_STK_*) have NO signal path — wire criteria/a calculator/a signal file, or
+retire them (ROADMAP G6). Not resolved here (per-strategy onboarding decision).
+
+UPDATE 2026-07-24 — migration 012 finishes the cleanup (apply after 011):
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db_setup/migrations/012_signal_mechanism_cleanup.sql
+  * Clears the stale signal_file_path on the 2 computed ETFs -> evidence_conflict 0.
+  * Adds has_universe/has_backtest to the audit view, then AUTO-RETIRES only the
+    inert 'none' orphans: no backtest run AND no ticker scores (a bare
+    universe_tickers watchlist is NOT footprint — the 3 COMM_* carry a universe
+    yet have no backtest, no scores, no mechanism, and zero repo references).
+    The DB picks; expected the 3 COMM_*. Reversible via retired_at=NULL. The
+    remaining 'none' (earnings_vol_crush_carry + the 3 US_STK_*) all have a
+    backtest run = real but unwired, left flagged for wiring (G6).
+  Verify:  SELECT strategy_id, retirement_reason FROM gold.strategy_registry WHERE retirement_reason LIKE 'G2/012%';
+           SELECT strategy_id, has_universe, has_backtest FROM gold.v_strategy_mechanism_audit WHERE verdict='none';
+
+- [ ] migrations 011 + 012 applied; 0 'multiple' and 0 evidence_conflict
+- [ ] auto-retired orphans reviewed (expected: 3 COMM_*); reversible if wrong
+- [ ] remaining verdict='none' (real, unwired) scheduled for wiring (G6)
+
 ### 1e. Post-refresh indicator/criteria health checks (ROADMAP G3)
 After a gold refresh (which now runs the FX/index stage-2 indicator fill), run
 against prod to confirm no BUY criterion points at a dead (mostly-NULL) column

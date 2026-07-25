@@ -47,7 +47,12 @@ END $$;
 -- temporary relation at all. This CTE is the one place that list is written
 -- down; keep it in sync with the scripts under agents/signals/pipeline +
 -- agents/etl/gold/strategy.
-CREATE OR REPLACE VIEW gold.v_strategy_mechanism_audit AS
+-- DROP + CREATE (not CREATE OR REPLACE): later migrations insert columns into
+-- the middle of this view's shape, which REPLACE cannot do (it can only append
+-- at the end). Drop-then-create makes the whole 010->011->012 sequence
+-- re-runnable from any state. Nothing depends on this view.
+DROP VIEW IF EXISTS gold.v_strategy_mechanism_audit;
+CREATE VIEW gold.v_strategy_mechanism_audit AS
 WITH _computed(strategy_id) AS (
     VALUES
         ('S9_MACD_Momentum_V2'),
