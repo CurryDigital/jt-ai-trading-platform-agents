@@ -39,7 +39,11 @@ SET client_min_messages = WARNING;
 
 -- (1) Corrected audit view: accurate _computed list + declaration-authoritative
 --     verdict + evidence_conflict advisory.
-CREATE OR REPLACE VIEW gold.v_strategy_mechanism_audit AS
+-- DROP + CREATE, not CREATE OR REPLACE: this adds evidence_conflict BEFORE the
+-- existing verdict column, which REPLACE reads as renaming verdict (it can only
+-- append at the end). Nothing depends on this view.
+DROP VIEW IF EXISTS gold.v_strategy_mechanism_audit;
+CREATE VIEW gold.v_strategy_mechanism_audit AS
 WITH _computed(strategy_id) AS (
     -- Strategies whose LIVE strategy_ticker_scores are produced by a dedicated
     -- calculator (code/SQL, not criteria rows and not an ingested file).

@@ -42,7 +42,11 @@ WHERE strategy_id IN ('ETF_US_Sector_Relative_Momentum', 'ETF_Covered_Call_Incom
 
 -- (2a) Extend the audit view with footprint evidence (has_universe, has_backtest)
 --      so 'none' strategies can be told apart: inert orphan vs unwired-but-real.
-CREATE OR REPLACE VIEW gold.v_strategy_mechanism_audit AS
+-- DROP + CREATE, not CREATE OR REPLACE: this inserts has_universe/has_backtest
+-- into the middle of the view's shape (via ev.*), which REPLACE cannot do.
+-- Nothing depends on this view.
+DROP VIEW IF EXISTS gold.v_strategy_mechanism_audit;
+CREATE VIEW gold.v_strategy_mechanism_audit AS
 WITH _computed(strategy_id) AS (
     VALUES
         ('ETF_US_Sector_Relative_Momentum'),
@@ -56,7 +60,10 @@ ev AS (
         EXISTS (SELECT 1 FROM gold.strategy_signal_criteria c WHERE c.strategy_id = r.strategy_id) AS has_criteria,
         (r.signal_file_path IS NOT NULL AND r.signal_file_path <> '')                              AS has_signal_file,
         EXISTS (SELECT 1 FROM _computed cc WHERE cc.strategy_id = r.strategy_id)                    AS is_computed,
-        (r.universe_tickers IS NOT NULL AND array_length(r.universe_tickers, 1) > 0)               AS has_universe,
+        -- COALESCE, not `array_length > 0`: array_length('{}',1) is NULL (not 0),
+        -- which would make has_universe NULL and silently break `NOT has_universe`
+        -- in the retire gate below (NULL is not TRUE -> orphan never retired).
+        (COALESCE(array_length(r.universe_tickers, 1), 0) > 0)                                     AS has_universe,
         EXISTS (SELECT 1 FROM gold.strategy_backtest_runs b WHERE b.strategy_id = r.strategy_id)    AS has_backtest
     FROM gold.strategy_registry r
     WHERE r.retired_at IS NULL
@@ -101,7 +108,7 @@ BEGIN
       INTO n_none_left, n_conflict FROM gold.v_strategy_mechanism_audit;
     RAISE NOTICE 'Migration 012: signal_file_path cleared on the 2 computed ETFs.';
     RAISE NOTICE '  auto-retired % zero-footprint orphan(s):', n_retired;
-    RAISE NOTICE '    SELECT strategy_id, retirement_reason FROM gold.strategy_registry WHERE retirement_reason LIKE ''G2/012%'';';
+    RAISE NOTICE '    SELECT strategy_id, retirement_reason FROM gold.strategy_registry WHERE retirement_reason LIKE ''G2/012%%'';';
     RAISE NOTICE '  evidence_conflict now = % (expect 0).', n_conflict;
     RAISE NOTICE '  verdict=none remaining = % — real but UNWIRED (have a universe/backtest); wire or retire (G6):', n_none_left;
     RAISE NOTICE '    SELECT strategy_id, has_universe, has_backtest FROM gold.v_strategy_mechanism_audit WHERE verdict=''none'';';
