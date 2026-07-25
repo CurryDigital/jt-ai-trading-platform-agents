@@ -13,13 +13,20 @@ CI enforces coverage. **Next:** run the generator against prod to create the
 ~34 semantic-strategy docs, then enrich each `signal_logic`/`exit_logic` in the
 registry so the generated docs are meaningful.
 
-## G2. One signal path per strategy (kill the mechanism sprawl) 🟡 STARTED 2026-07-22 (migration 010: signal_mechanism column + v_strategy_mechanism_audit; docs/generator wired. Operator: apply 010, resolve none/multiple)
-Today a strategy's BUY can come from criteria, a dedicated calculator, a
-signal-file ingest, or two of those at once (S9 has both). Make each strategy
-declare exactly ONE mechanism in the registry (`signal_mechanism` column), and
-have `run_signal_cycle.sh` dispatch on it. Then `audit_strategy_consistency.py`
-becomes a hard gate: every non-retired strategy must have a working mechanism
-or it's flagged, not silently all-HOLD.
+## G2. One signal path per strategy (kill the mechanism sprawl) ✅ DONE 2026-07-24 (code); operator applies 010+011 on prod
+Each strategy declares exactly ONE mechanism in `gold.strategy_registry.
+signal_mechanism` (migration 010) and `gold.v_strategy_mechanism_audit` grades
+every non-retired strategy ok/none/multiple so a signal-less strategy is flagged,
+not silently all-HOLD. Migration 011 resolved the 4 formerly-'multiple': tracing
+which script actually writes each strategy's `strategy_ticker_scores` proved
+S9=criteria (s9_macd_daily is a separate paper tracker), US_Sector + Covered_Call
+= computed, Multi_Asset = ingested — and fixed a wrong entry in 010's computed
+list. A declared mechanism is now authoritative in the verdict, with
+`evidence_conflict` surfacing a stale second source (e.g. an old signal_file_path)
+for later cleanup. **Operator:** apply 010 then 011; the 7 verdict='none'
+strategies still need a mechanism wired or retirement (that's G6 onboarding).
+Remaining polish: have `run_signal_cycle.sh` dispatch on `signal_mechanism`
+(today it runs every step unconditionally) — small, deferred.
 
 ## G3. Indicator correctness as a contract ✅ DONE 2026-07-24
 `indicators.py` is the one true source for RSI/MACD/ATR. The FX
