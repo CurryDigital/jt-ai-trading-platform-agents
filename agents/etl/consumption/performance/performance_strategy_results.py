@@ -106,8 +106,26 @@ def run():
         return
     cur.execute(SQL_BACKTEST)
     print(f"✅ consumption.strategies_backtest_results: {cur.rowcount} rows upserted")
-    cur.execute(SQL_MONTHLY)
-    print(f"✅ consumption.performance_monthly_returns: {cur.rowcount} rows upserted")
+
+    # performance_monthly_returns must be a TABLE to INSERT into. A quarantined
+    # 2026-07-22 one-off (update_monthly_view.py) once replaced it with a grouped
+    # VIEW, which made this step exit 1 and take down the rest of the daily run.
+    # Migration 013 restores the table; guard here so any future drift degrades
+    # to a warning instead of failing the whole pipeline.
+    cur.execute("""
+        SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname='consumption' AND c.relname='performance_monthly_returns'
+    """)
+    row = cur.fetchone()
+    if row is None:
+        print("⚠️ consumption.performance_monthly_returns missing — run migration 013; skipping monthly returns")
+    elif row[0] != 'r':
+        print(f"⚠️ consumption.performance_monthly_returns is not a table (relkind={row[0]}) — "
+              "schema drift, run migration 013; skipping monthly returns")
+    else:
+        cur.execute(SQL_MONTHLY)
+        print(f"✅ consumption.performance_monthly_returns: {cur.rowcount} rows upserted")
+
     cur.execute(SQL_ATTRIBUTION)
     print(f"✅ consumption.performance_strategy_attribution: {cur.rowcount} rows upserted")
     conn.commit()

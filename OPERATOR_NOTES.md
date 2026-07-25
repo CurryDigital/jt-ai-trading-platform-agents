@@ -213,6 +213,23 @@ things the numbers themselves now show:
 - [ ] Frontend/conviction gating on trade_count_oos decided
 - [ ] COMM_* sign convention normalized or runs re-delivered
 
+### 6b. 2026-07-24: same drop broke the daily performance step (schema drift)
+A 4th artifact of the 2026-07-22 drop, `workspace/oneoff/tmp-2026-07-22/
+update_monthly_view.py`, had DROPPED the `consumption.performance_monthly_
+returns` TABLE and replaced it with a VIEW derived from `gold.trade_executions`
+(which is EMPTY — see item 3 below). Two failures: the view yields nothing, and
+the daily ETL's `consumption/performance/performance_strategy_results.py` can't
+INSERT into a grouped view — so Pipeline A exited 1 on that step every run
+(caught by the hermes cron run 2026-07-24). Fix:
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db_setup/migrations/013_restore_performance_monthly_returns_table.sql
+013 reverts the drift (drops the view only if it IS a view, restores the
+canonical table + PK + UNIQUE(portfolio_type,year,month)); the script now also
+guards on relkind so any future drift degrades to a warning instead of failing
+the whole pipeline. Validated on a throwaway PG (drift→table + idempotent).
+
+- [ ] migration 013 applied on prod; daily performance step green
+- [ ] Pipeline A re-run exits 0 end-to-end
+
 ### 6. 2026-07-22 upload: fabricated/laundered metrics in prod (found in review)
 Three scripts from the 2026-07-22 drop (now quarantined in
 `workspace/oneoff/`, see its README) already ran against prod:
