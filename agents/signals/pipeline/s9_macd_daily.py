@@ -60,63 +60,35 @@ def has_open_trade(conn):
 
 
 def find_signals(conn):
-    """Find tickers meeting MACD histogram entry criteria today."""
+    """Find tickers meeting MACD histogram entry criteria today.
+
+    2026-07-22: reads macd_histogram / volume_ratio from gold.kpis_metrics
+    (the EMA-based indicators computed once in silver/compute_technical_
+    indicators.py) instead of recomputing MACD inline with AVG() (a simple
+    moving average, NOT an EMA — wrong MACD math that also disagreed with the
+    criteria scorer and the strategy's backtest). One MACD definition now.
+    prev_macd_hist = yesterday's macd_histogram via LAG.
+    """
     cur = conn.cursor()
     tickers_str = ','.join(f"'{t}'" for t in UNIVERSE)
     cur.execute(f"""
-        WITH macd_calc AS (
+        WITH k AS (
             SELECT
-                ticker,
-                date,
-                close,
-                volume,
-                AVG(close) OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 11 PRECEDING AND CURRENT ROW) AS ema_12,
-                AVG(close) OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 25 PRECEDING AND CURRENT ROW) AS ema_26,
-                AVG(volume) OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS vol_sma_20,
-                LAG(close, 1) OVER (PARTITION BY ticker ORDER BY date) AS prev_close
-            FROM silver.unified_prices
+                ticker, date, close, volume,
+                macd_histogram AS macd_hist,
+                volume_ratio,
+                LAG(macd_histogram) OVER (PARTITION BY ticker ORDER BY date) AS prev_macd_hist
+            FROM gold.kpis_metrics
             WHERE ticker IN ({tickers_str})
-        ),
-        macd_hist AS (
-            SELECT
-                ticker, date, close, volume, prev_close, vol_sma_20,
-                ema_12 - ema_26 AS macd_line,
-                AVG(ema_12 - ema_26) OVER (PARTITION BY ticker ORDER BY date ROWS BETWEEN 8 PRECEDING AND CURRENT ROW) AS macd_signal
-            FROM macd_calc
-        ),
-        macd_lagged AS (
-            SELECT
-                ticker, date, close, volume, prev_close, vol_sma_20,
-                macd_line - macd_signal AS macd_hist,
-                LAG(macd_line - macd_signal) OVER (PARTITION BY ticker ORDER BY date) AS prev_macd_hist
-            FROM macd_hist
-        ),
-        signals AS (
-            SELECT
-                ticker,
-                date,
-                close,
-                volume,
-                prev_close,
-                macd_hist,
-                prev_macd_hist,
-                CASE WHEN vol_sma_20 > 0 THEN volume / vol_sma_20 ELSE NULL END AS volume_ratio
-            FROM macd_lagged
-            WHERE date = (SELECT MAX(date) FROM silver.unified_prices WHERE ticker IN ({tickers_str}))
         )
-        SELECT
-            ticker,
-            date,
-            close,
-            volume,
-            prev_close,
-            macd_hist,
-            prev_macd_hist,
-            volume_ratio
-        FROM signals
-        WHERE macd_hist >= {ENTRY_HIST_THRESH}
-          AND prev_macd_hist <= {PREV_HIST_THRESH}
-          AND volume_ratio >= {VOLUME_RATIO_MIN}
+        SELECT ticker, date, close, volume,
+               NULL::numeric AS prev_close,
+               macd_hist, prev_macd_hist, volume_ratio
+        FROM k
+        WHERE date = (SELECT MAX(date) FROM gold.kpis_metrics WHERE ticker IN ({tickers_str}))
+          AND macd_hist        >= {ENTRY_HIST_THRESH}
+          AND prev_macd_hist   <= {PREV_HIST_THRESH}
+          AND volume_ratio     >= {VOLUME_RATIO_MIN}
         ORDER BY ticker
     """)
     rows = cur.fetchall()

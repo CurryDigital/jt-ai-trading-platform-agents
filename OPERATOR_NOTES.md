@@ -20,6 +20,60 @@ strategy entries). Details: `agents/signals/pipeline/README.md`.
 
 - [ ] pipeline_b_signals.sh updated on server
 
+### 1d. Apply migration 010 + resolve strategy signal-mechanism (ROADMAP G2)
+Migration 010 adds gold.strategy_registry.signal_mechanism and
+gold.v_strategy_mechanism_audit. After applying, run:
+    SELECT * FROM gold.v_strategy_mechanism_audit WHERE verdict <> 'ok';
+- verdict='none'   → strategy has NO signal path (all-HOLD forever). Wire a
+  mechanism (criteria rows / signal file / a calculator) or retire it.
+- verdict='multiple' → two writers (e.g. S9 = criteria AND s9_macd_daily.py).
+  Pick ONE: either drop the criteria rows (let the calculator own it) or make
+  the calculator exit-only. Then set signal_mechanism explicitly.
+The migration auto-sets only the unambiguous 'ok' strategies; none/multiple
+are left for this decision (never silently picked).
+
+### 1e. Post-refresh indicator/criteria health checks (ROADMAP G3)
+After a gold refresh (which now runs the FX/index stage-2 indicator fill), run
+against prod to confirm no BUY criterion points at a dead (mostly-NULL) column
+— the check that would have caught the killed macd_histogram:
+    python3 tools/check_criteria_columns.py       # exit 1 => a criterion column is >50% NULL
+Also spot-check the newly-filled indicators are populated (not NULL):
+    SELECT COUNT(*) FILTER (WHERE macd_histogram IS NOT NULL) AS nn, COUNT(*)
+      FROM gold.fx_metrics WHERE date > CURRENT_DATE - 30;
+    SELECT COUNT(*) FILTER (WHERE macd_hist IS NOT NULL) AS nn, COUNT(*)
+      FROM gold.index_metrics WHERE date > CURRENT_DATE - 30;
+Note: the stage-2 fill reads a 420-day warmup back from the gold table itself,
+so on a table with <~30 days of history macd/atr stay NULL by design (never
+fabricated) until enough history accumulates.
+
+Prod test 2026-07-25 (hermes) findings:
+- gold.index_metrics: macd_hist/atr_14 went 0/224 -> 224/224 after re-running
+  build_market_metrics.py. G3 fill proven end-to-end on real data.
+- gold.fx_metrics: last row is 2026-06-17, so nothing in the 30-day window —
+  the fill wrote 255 historical rows correctly but bronze.fx_prices ingestion
+  is STALE (~5 weeks). Not a builder bug; a data-feed gap (see flag 7 below).
+- check_criteria_columns.py FAILED (exit 1): gold.kpis_metrics.macd_histogram
+  is 99.4% NULL over 924 tickers. EXPECTED until the *equity* path is re-run:
+  the S1 fix lives in silver/compute_technical_indicators.py ->
+  gold/equity/build_equity_kpis.py, neither of which has run on prod since the
+  fix. Reviving macd_histogram (and every MACD BUY) requires, in order:
+      cd agents/etl
+      python3 silver/compute_technical_indicators.py   # writes silver.technical_indicators
+      python3 gold/equity/build_equity_kpis.py          # copies macd_histogram -> gold.kpis_metrics
+      python3 ../signals/pipeline/build_strategy_scores.py   # HOLD->BUY revival
+  then re-run tools/check_criteria_columns.py (expect green).
+
+- [x] check_criteria_columns.py green on prod — VALIDATED 2026-07-25 (hermes):
+      after re-running the fixed silver indicators + equity kpis, macd_histogram
+      went 99.4% -> 5.6% NULL (872/924 tickers), volume_ratio 4.3% NULL, guard
+      EXIT 0. The residual 5.6% is honest insufficient-history tickers, not a bug.
+- [x] kpis_metrics.macd_histogram revived + S9 BUY restored — VALIDATED 2026-07-25:
+      S9_MACD_Momentum_V2 went 0 BUY / 50 HOLD -> 1 BUY (TMO, score 100) / 49 HOLD.
+      NOTE: this SUSTAINS only once the fixed scripts run on the recurring path —
+      i.e. after PR #8 is deployed AND the daily refresh runs compute_technical_
+      indicators.py + build_equity_kpis.py (they already do; flag 1b cutover just
+      changes HOW they're invoked, not whether). Re-check with the guard weekly.
+
 ### 1b. Cut daily/hourly refresh over to run_stage.py (P1-5)
 The manifest engine is built, tested, and proven to enumerate EXACTLY the
 scripts daily_refresh.sh runs today (equivalence diff: 0 difference, 55
@@ -163,6 +217,90 @@ Three scripts from the 2026-07-22 drop (now quarantined in
        history WHERE status='closed' (migration 008 exposes status), NOT
        from execution_fills_real (which stays empty until real fills exist).
 
+### 7. bronze.fx_prices ingestion is stale (found 2026-07-25 prod test)
+gold.fx_metrics' latest row is 2026-06-17 — ~5 weeks stale as of the test.
+The G3 stage-2 fill wrote 255 historical FX rows correctly, but there is no
+recent data to indicate: bronze.fx_prices (and/or bronze.ibkr_fx_bars) isn't
+being updated by the ingestion job. This is a data-feed gap, not a builder
+bug — the FX MACD/ATR columns will populate for recent dates automatically
+once the feed resumes. Diagnose the FX ingestion cron / IBKR FX bar puller.
+
+- [ ] FX price ingestion confirmed running (bronze.fx_prices fresh) or gap explained
+
+
+---
+
+## 🐞 Signal-correctness bugs found & fixed (2026-07-22 internal review)
+
+Deep read of the actual signal-generation MATH (not process/plumbing) — the
+root causes of "buy signals / metrics / backtest figures missing". Fixed in
+code; each needs a real-DB run to take effect (indicators must recompute, then
+the scorers re-run).
+
+### S1. Technical indicators were NULL / SMA-not-EMA / 30-day window (ROOT CAUSE)
+`silver/compute_technical_indicators.py` (rewritten):
+- `rsi_14`, `macd_signal`, `macd_histogram`, `atr_14` were hardcoded `NULL`.
+  build_equity_kpis copies these into gold.kpis_metrics, so **macd_histogram
+  was NULL everywhere** — every MACD criterion (S9's `macd_histogram >= 0.1`,
+  cond_macd_bullish, s012_tech_momentum) silently never fired. Biggest reason
+  MACD strategies showed all-HOLD.
+- `ema_12`/`ema_26`/`macd_line` used AVG() = SMA, not EMA.
+- 30-day load window made `sma_50`/`sma_200` impossible (~21 rows for a
+  "200-day" average) → cond_above_sma200, golden/death cross, price_vs_sma200
+  all wrong.
+- ON CONFLICT didn't refresh macd_*/ema_*/rsi_14/volume_ratio → stale on re-run.
+Now: pure-Python `shared/scripts/indicators.py` (Wilder RSI/ATR, EMA MACD),
+unit-tested (`tests/test_indicators.py`, 7/7, incl. Wilder RSI vs classic
+~70.5), 420-day warmup, recent-tail write, full-column ON CONFLICT.
+
+### S2. S9 recomputed MACD with SMA (divergent 2nd definition)
+`s9_macd_daily.py::find_signals` now reads macd_histogram/volume_ratio from
+gold.kpis_metrics — one MACD definition, consistent with the criteria scorer.
+
+### S3. ETF relative-momentum: 3 bugs
+`gold/strategy/calc_etf_relative_momentum.py`:
+- HARDCODED PLAINTEXT DB PASSWORD in source → now uses shared db.py.
+- Lookbacks used trading-day counts (21/63/126/252) as calendar-day deltas
+  ("1m" ≈ 15 trading days, "12m" ≈ 8.3 months) → now 30/91/182/365 calendar.
+- fetch_universe read from the output table (strategy_ticker_scores), empty
+  after any truncate → now reads strategy_registry.universe_tickers.
+
+### S4. Incomplete ON CONFLICT across gold builders (systemic — every re-run)
+Most gold builders re-insert a rolling window (last 14–90 days) each run, so
+they hit ON CONFLICT for all but the newest date. Their DO UPDATE clauses
+refresh only a handful of the inserted columns, so recomputed indicators and
+derived flags stay STALE on ~13 of every 14 dates (and on same-day re-runs /
+the double-run). Fixed so far:
+- `gold/equity/build_equity_kpis.py` → kpis_metrics (9/56 → all 56). ROOT of
+  the signal path; also unblocks the corrected silver MACD/RSI propagating.
+- `gold/market/build_market_metrics.py` → index_metrics (5/32 → all 32).
+
+All metric-table upserts completed 2026-07-22 (column-match verified each):
+kpis_metrics, index_metrics, crypto_kpis, stock_metrics_history,
+commodity_futures, market_sentiment_daily, fx_metrics.
+STILL to do (lower priority):
+- `build_earnings_signals.py` → sue_scores         (4/8)
+- `build_ipo_data.py`         → hk_ipo_* (reference data)
+
+Do NOT blanket-refresh the LEDGER/state tables — their partial update is
+INTENTIONAL (rewriting an open position's entry_price/entry_date would corrupt
+the trade record):
+- `rebuild_paper_positions.py` → paper_trades_synthetic (entry_* immutable)
+- `build_portfolio_snapshot.py` → ibkr_positions_live
+
+### Also still NULL (same class as S1, different tables)
+- `build_fx_metrics.py` and `build_market_metrics.py`(index) hardcode
+  macd_signal/macd_histogram (and FX rsi_14) to NULL and use AVG()=SMA. No
+  signal reads fx_metrics today, but any FX/index MACD criterion would be
+  dead. Port to shared/scripts/indicators.py when those strategies go live.
+
+### Still open (found, not fixed — needs decisions)
+- `build_strategy_scores` only scores strategies with strategy_signal_criteria
+  rows; most registry strategies have none, so they depend on file-ingest or a
+  dedicated calculator. Ones with neither are all-HOLD by construction — use
+  `tools/audit_strategy_consistency.py` to see each strategy's mechanism.
+- rebalancer publishes `signal_strength == confidence_score` (both score/100)
+  — meaningless duplication; confidence should measure something distinct.
 
 ---
 

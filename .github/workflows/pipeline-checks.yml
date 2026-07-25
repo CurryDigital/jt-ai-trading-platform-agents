@@ -46,3 +46,13 @@ jobs:
       - name: Pipeline state tests (DB-free)
         working-directory: agents/etl
         run: python tests/test_pipeline_state.py
+
+      - name: Technical-indicator tests (DB-free)
+        working-directory: agents/etl
+        run: python tests/test_indicators.py
+
+      - name: Strategy docs coverage (DB-free)
+        run: python tools/check_strategy_docs.py
+
+      - name: Metric upsert completeness (DB-free)
+        run: python tools/check_upsert_completeness.py

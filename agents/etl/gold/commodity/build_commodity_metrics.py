@@ -54,11 +54,24 @@ with_indicators AS (
 )
 SELECT * FROM with_indicators
 ON CONFLICT (ticker, date) DO UPDATE SET
+  name           = EXCLUDED.name,
+  category       = EXCLUDED.category,
+  exchange       = EXCLUDED.exchange,
+  open_price     = EXCLUDED.open_price,
+  high_price     = EXCLUDED.high_price,
+  low_price      = EXCLUDED.low_price,
   close_price    = EXCLUDED.close_price,
+  volume         = EXCLUDED.volume,
   returns        = EXCLUDED.returns,
   log_returns    = EXCLUDED.log_returns,
   volatility_20d = EXCLUDED.volatility_20d,
-  collected_at   = NOW();
+  sma_50         = EXCLUDED.sma_50,
+  sma_200        = EXCLUDED.sma_200,
+  month          = EXCLUDED.month,
+  quarter        = EXCLUDED.quarter,
+  year           = EXCLUDED.year,
+  day_of_year    = EXCLUDED.day_of_year,
+  collected_at   = EXCLUDED.collected_at;
 """
 
 SQL_SEASONALITY = """

@@ -38,8 +38,12 @@ node_modules/
 *.parquet
 *.pkl
 *.csv
-agents/etl/gold/crypto/
-agents/etl/silver/crypto/
+agents/etl/gold/crypto/*.csv
+agents/etl/gold/crypto/*.parquet
+agents/etl/gold/crypto/summary_*.json
+agents/etl/silver/crypto/*.csv
+agents/etl/silver/crypto/*.parquet
+agents/etl/silver/crypto/summary_*.json
 agents/signals/data/
 agents/signals/regime/*.pkl
 

@@ -6,7 +6,7 @@
     "Fields per entry:",
     "  id          : integer, must be unique. Used as the strategy_id in gold.strategy_signals.",
     "  name        : short label shown in dashboards and logs.",
-    "  class_path  : 'module.path:ClassName' — must be importable from the agents/signals/ root.",
+    "  class_path  : 'module.path:ClassName' \u2014 must be importable from the agents/signals/ root.",
     "  tier        : one of {experimental, near_golden, golden}. Mirrors gold.strategy_registry.priority",
     "                (EXPERIMENTAL/NEAR_GOLDEN/GOLDEN) and MUST match the folder the file lives in:",
     "                strategies/<tier>/strategy_NN.py. Promotion = git mv the file + update tier +",
@@ -15,71 +15,127 @@
     "  enabled     : true = run in daily cron and write signals. false = imported only, NEVER writes signals.",
     "  asset_class : {equity, crypto, fx, commodity}. Used for filtering and reporting.",
     "  params      : free-form dict the strategy class reads (basket, lookback windows, thresholds...).",
-    "                Strategies that don't yet read from params still work — they ignore this field.",
+    "                Strategies that don't yet read from params still work \u2014 they ignore this field.",
     "  notes       : human-readable history / TODO.",
     "2026-07-10: removed the 13 permanently-disabled stub entries (ids 3,4,5,7,8,9,10,12,13,14,17,19,20)",
     "and strategies/stubs.py. They were idea placeholders with no implementation; the same strategy ideas",
     "are now tracked as real rows in the gold.strategy_registry DB table (PEAD, BTC funding carry, COT",
     "fade/contrarian, etc.), so keeping a second, dead copy here was pure duplication. Historical ids stay",
-    "retired — register new strategies with fresh ids to avoid colliding with old gold.strategy_signals rows."
+    "retired \u2014 register new strategies with fresh ids to avoid colliding with old gold.strategy_signals rows."
   ],
   "schema_version": 2,
-  "retired_ids": [3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 17, 19, 20],
+  "retired_ids": [
+    3,
+    4,
+    5,
+    7,
+    8,
+    9,
+    10,
+    12,
+    13,
+    14,
+    17,
+    19,
+    20
+  ],
   "strategies": [
     {
-      "id": 1, "name": "Dual EMA crossover",
+      "id": 1,
+      "name": "Dual EMA crossover",
       "class_path": "strategies.experimental.strategy_01:Strategy01",
       "tier": "experimental",
-      "regime": "TREND", "enabled": true, "asset_class": "equity",
+      "regime": "TREND",
+      "enabled": true,
+      "asset_class": "equity",
       "params": {
-        "basket": ["SPY", "QQQ", "IWM", "GLD", "TLT"],
-        "ema_fast": 10, "ema_slow": 50,
-        "delta_long_threshold": 0.001, "delta_short_threshold": -0.001,
+        "basket": [
+          "SPY",
+          "QQQ",
+          "IWM",
+          "GLD",
+          "TLT"
+        ],
+        "ema_fast": 10,
+        "ema_slow": 50,
+        "delta_long_threshold": 0.001,
+        "delta_short_threshold": -0.001,
         "vol_window": 20
       },
-      "notes": "Real implementation. Params still read from inside the class; migrate to read from this dict in a follow-up."
+      "notes": "Real implementation. Params still read from inside the class; migrate to read from this dict in a follow-up.",
+      "doc_id": "signal_agent_dual_ema_crossover"
     },
     {
-      "id": 2, "name": "52-week high momentum",
+      "id": 2,
+      "name": "52-week high momentum",
       "class_path": "strategies.experimental.strategy_02:Strategy02",
       "tier": "experimental",
-      "regime": "TREND", "enabled": true, "asset_class": "equity",
-      "params": {}, "notes": "Real implementation."
+      "regime": "TREND",
+      "enabled": true,
+      "asset_class": "equity",
+      "params": {},
+      "notes": "Real implementation.",
+      "doc_id": "signal_agent_52wk_high_momentum"
     },
     {
-      "id": 6, "name": "BTC Donchian breakout",
+      "id": 6,
+      "name": "BTC Donchian breakout",
       "class_path": "strategies.experimental.strategy_06:Strategy06",
       "tier": "experimental",
-      "regime": "TREND", "enabled": true, "asset_class": "crypto",
-      "params": {}, "notes": "Real implementation."
+      "regime": "TREND",
+      "enabled": true,
+      "asset_class": "crypto",
+      "params": {},
+      "notes": "Real implementation.",
+      "doc_id": "signal_agent_btc_donchian_breakout"
     },
     {
-      "id": 11, "name": "E-mini S&P trend + ATR",
+      "id": 11,
+      "name": "E-mini S&P trend + ATR",
       "class_path": "strategies.experimental.strategy_11:Strategy11",
       "tier": "experimental",
-      "regime": "TREND", "enabled": true, "asset_class": "equity",
-      "params": {}, "notes": "Real implementation."
+      "regime": "TREND",
+      "enabled": true,
+      "asset_class": "equity",
+      "params": {},
+      "notes": "Real implementation.",
+      "doc_id": "signal_agent_emini_trend_atr"
     },
     {
-      "id": 15, "name": "Natgas seasonal",
+      "id": 15,
+      "name": "Natgas seasonal",
       "class_path": "strategies.experimental.strategy_15:Strategy15",
       "tier": "experimental",
-      "regime": "TREND", "enabled": true, "asset_class": "commodity",
-      "params": {}, "notes": "Real implementation."
+      "regime": "TREND",
+      "enabled": true,
+      "asset_class": "commodity",
+      "params": {},
+      "notes": "Real implementation.",
+      "doc_id": "signal_agent_natgas_seasonal"
     },
     {
-      "id": 16, "name": "London FX breakout",
+      "id": 16,
+      "name": "London FX breakout",
       "class_path": "strategies.experimental.strategy_16:Strategy16",
       "tier": "experimental",
-      "regime": "TREND", "enabled": true, "asset_class": "fx",
-      "params": {}, "notes": "Real implementation."
+      "regime": "TREND",
+      "enabled": true,
+      "asset_class": "fx",
+      "params": {},
+      "notes": "Real implementation.",
+      "doc_id": "signal_agent_london_fx_breakout"
     },
     {
-      "id": 18, "name": "USD/JPY macro trend",
+      "id": 18,
+      "name": "USD/JPY macro trend",
       "class_path": "strategies.experimental.strategy_18:Strategy18",
       "tier": "experimental",
-      "regime": "TREND", "enabled": true, "asset_class": "fx",
-      "params": {}, "notes": "Real implementation."
+      "regime": "TREND",
+      "enabled": true,
+      "asset_class": "fx",
+      "params": {},
+      "notes": "Real implementation.",
+      "doc_id": "signal_agent_usdjpy_macro_trend"
     }
   ]
 }

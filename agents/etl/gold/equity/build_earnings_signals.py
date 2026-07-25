@@ -38,8 +38,11 @@ SELECT
 FROM silver.unified_earnings
 WHERE eps_surprise_pct IS NOT NULL
 ON CONFLICT (symbol, earnings_date) DO UPDATE SET
-  eps_surprise_pct  = EXCLUDED.eps_surprise_pct,
-  surprise_category = EXCLUDED.surprise_category;
+  eps_surprise_pct    = EXCLUDED.eps_surprise_pct,
+  surprise_category   = EXCLUDED.surprise_category,
+  signal_window_start = EXCLUDED.signal_window_start,
+  signal_window_end   = EXCLUDED.signal_window_end,
+  created_at          = NOW();
 """
 
 SQL_DATA = """
@@ -51,8 +54,11 @@ SELECT
   NOW()
 FROM silver.unified_earnings
 ON CONFLICT (ticker, report_date) DO UPDATE SET
-  actual_eps   = EXCLUDED.actual_eps,
-  surprise_pct = EXCLUDED.surprise_pct;
+  fiscal_quarter = EXCLUDED.fiscal_quarter,
+  actual_eps     = EXCLUDED.actual_eps,
+  estimate_eps   = EXCLUDED.estimate_eps,
+  surprise_pct   = EXCLUDED.surprise_pct,
+  collected_at   = NOW();
 """
 
 SQL_SUE = """
@@ -67,9 +73,14 @@ SELECT
 FROM silver.unified_earnings
 WHERE sue_score IS NOT NULL
 ON CONFLICT (ticker, report_date) DO UPDATE SET
-  sue         = EXCLUDED.sue,
-  sue_decile  = EXCLUDED.sue_decile,
-  sue_category = EXCLUDED.sue_category;
+  fiscal_quarter = EXCLUDED.fiscal_quarter,
+  actual_eps     = EXCLUDED.actual_eps,
+  estimate_eps   = EXCLUDED.estimate_eps,
+  surprise_pct   = EXCLUDED.surprise_pct,
+  sue            = EXCLUDED.sue,
+  sue_decile     = EXCLUDED.sue_decile,
+  sue_category   = EXCLUDED.sue_category,
+  calculated_at  = NOW();
 """
 
 def run():

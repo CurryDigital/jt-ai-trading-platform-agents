@@ -108,13 +108,44 @@ SELECT
   NOW()
 FROM indicators
 
+-- 2026-07-22: refresh all 34 computed non-key columns on conflict (was 5).
+-- crypto_kpis is a pure (ticker,date) metric table re-inserted each run.
 ON CONFLICT (ticker, date) DO UPDATE SET
-  close            = EXCLUDED.close,
-  volume           = EXCLUDED.volume,
-  volatility_20d   = EXCLUDED.volatility_20d,
-  crypto_breakout_trigger        = EXCLUDED.crypto_breakout_trigger,
-  crypto_oversold_bounce_trigger = EXCLUDED.crypto_oversold_bounce_trigger,
-  updated_at       = NOW();
+  open                            = EXCLUDED.open,
+  high                            = EXCLUDED.high,
+  low                             = EXCLUDED.low,
+  close                           = EXCLUDED.close,
+  volume                          = EXCLUDED.volume,
+  body_size                       = EXCLUDED.body_size,
+  upper_shadow                    = EXCLUDED.upper_shadow,
+  lower_shadow                    = EXCLUDED.lower_shadow,
+  candle_type                     = EXCLUDED.candle_type,
+  atr_14                          = EXCLUDED.atr_14,
+  volatility_20d                  = EXCLUDED.volatility_20d,
+  volatility_7d                   = EXCLUDED.volatility_7d,
+  daily_range_pct                 = EXCLUDED.daily_range_pct,
+  sma_5                           = EXCLUDED.sma_5,
+  sma_20                          = EXCLUDED.sma_20,
+  sma_50                          = EXCLUDED.sma_50,
+  trend_direction                 = EXCLUDED.trend_direction,
+  price_vs_sma20_pct              = EXCLUDED.price_vs_sma20_pct,
+  rsi_14                          = EXCLUDED.rsi_14,
+  macd_line                       = EXCLUDED.macd_line,
+  macd_signal                     = EXCLUDED.macd_signal,
+  bb_upper                        = EXCLUDED.bb_upper,
+  bb_lower                        = EXCLUDED.bb_lower,
+  bb_position                     = EXCLUDED.bb_position,
+  volume_sma_20                   = EXCLUDED.volume_sma_20,
+  volume_ratio                    = EXCLUDED.volume_ratio,
+  cond_high_volume                = EXCLUDED.cond_high_volume,
+  cond_rsi_below_30               = EXCLUDED.cond_rsi_below_30,
+  cond_rsi_above_70               = EXCLUDED.cond_rsi_above_70,
+  cond_above_bb                   = EXCLUDED.cond_above_bb,
+  cond_below_bb                   = EXCLUDED.cond_below_bb,
+  crypto_breakout_trigger         = EXCLUDED.crypto_breakout_trigger,
+  crypto_oversold_bounce_trigger  = EXCLUDED.crypto_oversold_bounce_trigger,
+  crypto_volume_spike_trigger     = EXCLUDED.crypto_volume_spike_trigger,
+  updated_at                      = NOW();
 """
 
 def run():

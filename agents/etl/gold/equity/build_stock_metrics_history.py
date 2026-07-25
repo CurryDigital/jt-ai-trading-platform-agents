@@ -88,12 +88,48 @@ WHERE ar.asset_class = 'STOCK'
   AND p.date > COALESCE((SELECT max_date FROM max_history), '2000-01-01')
 WINDOW w AS (PARTITION BY p.ticker ORDER BY p.date)
 
+-- 2026-07-22: refresh all 36 computed non-key columns on conflict (was 4).
+-- Pure (ticker,date) metric-history table; the incremental window re-inserts
+-- overlapping dates, so macd_*, adx, psar, returns_*, rel_strength_* etc.
+-- were stale on every re-processed row.
 ON CONFLICT (ticker, date) DO UPDATE SET
-  close        = EXCLUDED.close,
-  rsi_14       = EXCLUDED.rsi_14,
-  golden_cross = EXCLUDED.golden_cross,
-  above_sma_200 = EXCLUDED.above_sma_200,
-  created_at   = EXCLUDED.created_at;
+  sector              = EXCLUDED.sector,
+  open                = EXCLUDED.open,
+  high                = EXCLUDED.high,
+  low                 = EXCLUDED.low,
+  close               = EXCLUDED.close,
+  volume              = EXCLUDED.volume,
+  vwap                = EXCLUDED.vwap,
+  rsi_14              = EXCLUDED.rsi_14,
+  macd_line           = EXCLUDED.macd_line,
+  macd_signal         = EXCLUDED.macd_signal,
+  macd_hist           = EXCLUDED.macd_hist,
+  sma_50              = EXCLUDED.sma_50,
+  sma_200             = EXCLUDED.sma_200,
+  stoch_k             = EXCLUDED.stoch_k,
+  stoch_d             = EXCLUDED.stoch_d,
+  adx                 = EXCLUDED.adx,
+  adx_plus_di         = EXCLUDED.adx_plus_di,
+  adx_minus_di        = EXCLUDED.adx_minus_di,
+  psar                = EXCLUDED.psar,
+  psar_direction      = EXCLUDED.psar_direction,
+  atr_14              = EXCLUDED.atr_14,
+  beta                = EXCLUDED.beta,
+  volatility_21d      = EXCLUDED.volatility_21d,
+  returns_1d          = EXCLUDED.returns_1d,
+  returns_5d          = EXCLUDED.returns_5d,
+  returns_21d         = EXCLUDED.returns_21d,
+  volume_sma_20       = EXCLUDED.volume_sma_20,
+  volume_ratio        = EXCLUDED.volume_ratio,
+  golden_cross        = EXCLUDED.golden_cross,
+  death_cross         = EXCLUDED.death_cross,
+  above_sma_200       = EXCLUDED.above_sma_200,
+  rel_strength_sp500  = EXCLUDED.rel_strength_sp500,
+  rel_strength_sector = EXCLUDED.rel_strength_sector,
+  dist_from_52w_high  = EXCLUDED.dist_from_52w_high,
+  dist_from_ytd_high  = EXCLUDED.dist_from_ytd_high,
+  dist_from_ytd_low   = EXCLUDED.dist_from_ytd_low,
+  created_at          = EXCLUDED.created_at;
 """
 
 def run():
