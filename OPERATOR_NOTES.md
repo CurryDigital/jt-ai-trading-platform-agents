@@ -63,8 +63,16 @@ Prod test 2026-07-25 (hermes) findings:
       python3 ../signals/pipeline/build_strategy_scores.py   # HOLD->BUY revival
   then re-run tools/check_criteria_columns.py (expect green).
 
-- [ ] check_criteria_columns.py green on prod after a full refresh
-- [ ] silver indicators + equity kpis re-run so kpis_metrics.macd_histogram lives
+- [x] check_criteria_columns.py green on prod — VALIDATED 2026-07-25 (hermes):
+      after re-running the fixed silver indicators + equity kpis, macd_histogram
+      went 99.4% -> 5.6% NULL (872/924 tickers), volume_ratio 4.3% NULL, guard
+      EXIT 0. The residual 5.6% is honest insufficient-history tickers, not a bug.
+- [x] kpis_metrics.macd_histogram revived + S9 BUY restored — VALIDATED 2026-07-25:
+      S9_MACD_Momentum_V2 went 0 BUY / 50 HOLD -> 1 BUY (TMO, score 100) / 49 HOLD.
+      NOTE: this SUSTAINS only once the fixed scripts run on the recurring path —
+      i.e. after PR #8 is deployed AND the daily refresh runs compute_technical_
+      indicators.py + build_equity_kpis.py (they already do; flag 1b cutover just
+      changes HOW they're invoked, not whether). Re-check with the guard weekly.
 
 ### 1b. Cut daily/hourly refresh over to run_stage.py (P1-5)
 The manifest engine is built, tested, and proven to enumerate EXACTLY the
