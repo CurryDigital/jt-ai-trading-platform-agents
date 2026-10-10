@@ -59,7 +59,9 @@ def sync_account_summary(conn, dry_run=False):
     cur = conn.cursor()
     cur.execute("""
         SELECT account, net_liquidation, cash_hkd, cash_usd,
-               available_funds, buying_power, position_count, fetched_at
+               available_funds, buying_power, position_count, fetched_at,
+               base_currency, net_liquidation_usd, available_funds_usd,
+               buying_power_usd, cash_total_usd, fx_rate, fx_date
         FROM bronze.ibkr_account_summary
         ORDER BY fetched_at DESC LIMIT 1;
     """)
@@ -68,14 +70,16 @@ def sync_account_summary(conn, dry_run=False):
         print("No account summary found")
         return 0
     if dry_run:
-        print(f"[DRY-RUN] Would sync account: net_liq={row[1]}")
+        print(f"[DRY-RUN] Would sync account: net_liq={row[1]} {row[8]} = USD {row[9]}")
         return 1
     cur.execute("TRUNCATE gold.ibkr_account_summary;")
     cur.execute("""
-        INSERT INTO gold.ibkr_account_summary 
+        INSERT INTO gold.ibkr_account_summary
             (account, net_liquidation, cash_hkd, cash_usd,
-             available_funds, buying_power, position_count, fetched_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+             available_funds, buying_power, position_count, fetched_at,
+             base_currency, net_liquidation_usd, available_funds_usd,
+             buying_power_usd, cash_total_usd, fx_rate, fx_date)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
     """, row)
     conn.commit()
     print(f"Synced account summary")
