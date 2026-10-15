@@ -1,0 +1,14 @@
+{
+  "tag": "kat-validated-round8",
+  "created_utc": "2026-10-15",
+  "engine_hash_of_record": "engine.py",
+  "files": {
+    "engine.py": "6d406d6ad2892fb308fe11b6f79484fcddbc75439298a5d4d67070f538ec2997",
+    "kat_bxm_put.py": "21fd6fccd5660530480f4900f9737659ae1e7a0aebaf7a1187155de3c1f9c808",
+    "kat_spx.py": "7a9977183b28e22382df110c85f0ddc0ecf8a4bb4cb7b2821e510c03e4cb78dd",
+    "engine_version.py": "265cfe15ef078bec6cad622b3ce2a4b1e41900897cb6db5390fab74f4d6df27a",
+    "reference/BXM_History.csv": "2c525ce59da29546d50a8b00a0dcb9b32a5c7ae70475e5b47d28256bdd335fcd",
+    "reference/PUT_History.csv": "b026b1cc643fbd4c68cc05e0dee7beac56d299cc5ca653a340c86908dcd77da1"
+  },
+  "rule": "Any engine.py change requires a new KAT and a new manifest/tag before derivatives backtests run."
+}
