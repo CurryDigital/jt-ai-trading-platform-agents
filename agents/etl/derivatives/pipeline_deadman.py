@@ -9,14 +9,20 @@ absence of a run alerts, not just a failed run.
 Checks:
   1. OPTIONS (deriv_thetadata_refresh, 22:45 UTC Mon-Fri; window ends T-1 ET
      by design): silver.option_eod_quotes must have rows for exp_opts, where
-     exp_opts = last SPY trading day <= (today_ET - 1 day).
+     exp_opts = latest SPY trading day whose LOAD TICK has passed. A trade
+     date T is expected only after the next weekday 22:45 UTC run following T
+     (Fri T -> Mon 22:45), so off-schedule runs after midnight ET do not
+     expect tonight's date early.
      On Tue-Sat mornings the latest SUCCESS eod ingest run must be <26h old
      (proves last night's cron fired; Mon/Sun mornings exempt — last
      scheduled run was Friday night).
   2. REGIME WF (regime_wf_daily, 23:15 UTC Mon-Fri): deriv.regime_label_wf
-     max(date) must equal exp_wf = last SPY trading day <= today_ET.
-     If gold.regime_features itself lags exp_wf, alert names the upstream
-     stall instead (builder cannot outrun its inputs).
+     series wf_v3 max(date) must equal exp_wf = last SPY trading day <=
+     today_ET (V1 forward gate needs a nightly wf_v3 label). If
+     gold.regime_features itself lags exp_wf, alert names the upstream stall
+     instead (builder cannot outrun its inputs). Also re-runs the builder's
+     SPY/^VIX + features calendar-completeness checks read-only over the
+     trailing 400d (builder hard-fails on the full span nightly).
   3. ORACLE GUARD: the SPY trading-day calendar (gold.daily_ohlcv) must be
      fresh (max date >= today_ET - 4 days) or the expected-date math itself
      is untrustworthy -> alert instead of silently passing.
@@ -43,6 +49,10 @@ Account-value deadman (kanban t_5cac69f2, currency audit 2026-10-09):
      a USD-labeled net_liquidation must be consistent with the HKD base within
      ACCT_FX_TOL_PCT (default 10%) of the USDHKD=X fx oracle. DUP825942 base
      currency is HKD (ACCT_BASE_CCY).
+  8. GOLD CONTIGUITY (gap_remediation_v1, 2026-10-14): every ACTIVE ticker in
+     gold.daily_ohlcv must be present on every weekday in the trailing
+     GAP_WINDOW_DAYS (30) beyond its per-market holiday allowance — a
+     max(date) check cannot see a mid-history month hole (2026-03 incident).
 
 All thresholds are environment settings (see below), not buried constants.
 Exit 0 + empty stdout = silent pass.
@@ -56,6 +66,22 @@ sys.path.insert(0, "/home/ubuntu/.hermes/profiles/qr_etl/home/trading-platform/a
 import db  # noqa: E402
 
 ALERTS = []
+
+# ── gold.daily_ohlcv per-ticker contiguity (kanban: gap_remediation_v1 step 3) ─
+# A max(date) freshness check never sees a mid-history hole (the March 2026
+# incident: every equity ticker missing a full month for 7 months). This check
+# verifies, for every ACTIVE ticker (has a gold row inside the trailing
+# window), that no more than a holiday allowance of WEEKDAYS are missing in
+# that window. Weekday-based (no calendar-lib dependency): US/SG have <=2
+# weekday holidays in any 30d; HK up to ~4; CN up to ~7 (golden week).
+# FX tickers trade weekdays (same rule); crypto trades daily (handled via
+# asset_class=CRYPTO with allowance 0 against calendar days).
+GAP_ENABLED = os.environ.get("GAP_CONTIGUITY_ENABLED", "1") == "1"
+GAP_WINDOW_DAYS = int(os.environ.get("GAP_WINDOW_DAYS", "30"))
+GAP_MAX_MISSING = {"US": 3, "SG": 3, "HK": 5, "CN": 7,
+                   "FX": 3, "GLOBAL": 3, "INDEX": 5}
+GAP_MAX_MISSING_DEFAULT = 5
+GAP_ALERT_MAX_LIST = int(os.environ.get("GAP_ALERT_MAX_LIST", "15"))
 
 # ── account-value deadman settings (env-overridable) ─────────────────────────
 ACCT_BRONZE_MAX_AGE_H = float(os.environ.get("ACCT_BRONZE_MAX_AGE_H", "30"))
@@ -240,6 +266,91 @@ def check_account_values(state, now_utc, weekday_utc):
     # to validate; staleness/jump/unit checks above still guard the values.
 
 
+# ── 8. gold.daily_ohlcv per-ticker contiguity ────────────────────────────────
+
+def check_gold_contiguity(cur, today_utc):
+    """Per-ticker weekday-contiguity over the trailing GAP_WINDOW_DAYS.
+
+    Active = ticker has >=1 close-valid gold row in the window. For each
+    active ticker count missing expected days (weekdays Mon-Fri, or every
+    calendar day for CRYPTO) and alert per market when a ticker exceeds its
+    holiday allowance. Window starts at the ticker's first in-window row so
+    freshly-listed names are not flagged for pre-listing days.
+    """
+    if not GAP_ENABLED:
+        return
+    win_start = today_utc - timedelta(days=GAP_WINDOW_DAYS)
+    cur.execute("""
+        SELECT ticker, date,
+               COALESCE(NULLIF(upper(market), ''), 'US') AS market,
+               COALESCE(NULLIF(upper(asset_class), ''), '') AS asset_class
+        FROM gold.daily_ohlcv
+        WHERE date >= %s AND date <= %s AND close IS NOT NULL
+        ORDER BY ticker, date
+    """, (win_start, today_utc))
+    rows = cur.fetchall()
+    if not rows:
+        alert("GAP CONTIGUITY: gold.daily_ohlcv has no close-valid rows in "
+              f"the trailing {GAP_WINDOW_DAYS}d — oracle broken")
+        return
+
+    # expected weekdays in window (exclude today if the day is not over —
+    # deadman runs 01:00 UTC, today's US close has not landed yet)
+    last_expect = today_utc - timedelta(days=1)
+    while last_expect.weekday() >= 5:
+        last_expect -= timedelta(days=1)
+
+    by_ticker = {}
+    for t, d, m, a in rows:
+        by_ticker.setdefault(t, {'dates': set(), 'market': m,
+                                 'asset_class': a})['dates'].add(d)
+
+    # Known delistings (confirmed via news/registry): no trading expected on
+    # or after the delist date; skip when the ticker's last in-window row is
+    # before it. WBD: acquired by Paramount Skydance, completed 2026-10-06
+    # (stock last traded 2026-10-05; Form 25 filed ~10-06).
+    KNOWN_DELISTED = {'WBD': date(2026, 10, 6)}
+    for t, dd in KNOWN_DELISTED.items():
+        info = by_ticker.get(t)
+        if info and max(info['dates']) < dd:
+            del by_ticker[t]
+
+    # weekday / calendar-day expectation helpers
+    def expected_days(first_seen, crypto):
+        days = []
+        d = first_seen
+        while d <= last_expect:
+            if crypto or d.weekday() < 5:
+                days.append(d)
+            d += timedelta(days=1)
+        return days
+
+    offenders = {}  # market -> [(ticker, missing_count, first..last span)]
+    for t, info in by_ticker.items():
+        dates = info['dates']
+        first_seen = max(win_start, min(dates))
+        crypto = info['asset_class'] == 'CRYPTO' or t.endswith('-USD')
+        exp = expected_days(first_seen, crypto)
+        missing = [d for d in exp if d not in dates]
+        if not missing:
+            continue
+        allowance = 0 if crypto else GAP_MAX_MISSING.get(
+            info['market'], GAP_MAX_MISSING_DEFAULT)
+        if len(missing) > allowance:
+            offenders.setdefault(info['market'], []).append(
+                (t, len(missing), missing[0], missing[-1]))
+
+    for m, off in sorted(offenders.items()):
+        off.sort(key=lambda x: -x[1])
+        listed = "; ".join(f"{t}:{n}d({a}..{b})" for t, n, a, b
+                           in off[:GAP_ALERT_MAX_LIST])
+        more = f" +{len(off) - GAP_ALERT_MAX_LIST} more" \
+            if len(off) > GAP_ALERT_MAX_LIST else ""
+        alert(f"GOLD GAP: {len(off)} {m} tickers missing >allowance weekdays "
+              f"in trailing {GAP_WINDOW_DAYS}d (as of {last_expect}): "
+              f"{listed}{more} — possible ingest hole like 2026-03")
+
+
 def main():
     now_utc = datetime.now(timezone.utc)
     today_et = now_utc.astimezone(ZoneInfo("America/New_York")).date()
@@ -263,9 +374,17 @@ def main():
         alert(f"ORACLE STALE: gold.daily_ohlcv SPY max={oracle_max} (today_ET={today_et}) — "
               "equity pipeline itself is down; deriv expectations unreliable")
 
-    cut_opts = today_et - timedelta(days=1)   # options: T-1 ET lag by design
+    def options_load_tick(d):
+        """ThetaData EOD for trade date d lands at the next weekday 22:45 UTC
+        run after d (Fri d -> Mon 22:45). A date is expected only once its
+        load tick has passed."""
+        ld = d + timedelta(days=1)
+        while ld.weekday() >= 5:  # Sat/Sun -> next Mon
+            ld += timedelta(days=1)
+        return datetime.combine(ld, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=22, minutes=45)
+
     cut_wf = today_et                          # regime wf: same-evening via 22:30 topup
-    exp_opts = max((d for d in tdays if d <= cut_opts), default=None)
+    exp_opts = max((d for d in tdays if options_load_tick(d) <= now_utc), default=None)
     exp_wf = max((d for d in tdays if d <= cut_wf), default=None)
 
     # ── 1. options chain ──────────────────────────────────────────────────────
@@ -310,23 +429,66 @@ def main():
                     alert(f"OPTIONS RUN ABSENT: last SUCCESS eod ingest run finished {last_ok:%Y-%m-%d %H:%M} UTC "
                           f"({age_h:.1f}h ago) — last night's 22:45 cron did not fire or failed")
 
-    # ── 2. regime walk-forward ────────────────────────────────────────────────
+    # ── 2. regime walk-forward (wf_v3) ────────────────────────────────────────
+    # 2026-10-16: pause ack REMOVED per user directive — wf_v3 (rebuilt on
+    # healed + split-fixed gold, t_183d8bb1) is the live series for the Run-1
+    # V1 forward gate and must be fresh every night. Staleness alerts again.
+    WF_SERIES = os.environ.get("REGIME_WF_SERIES", "wf_v3")
     if exp_wf is None:
         alert("REGIME_WF: no expected trade date computable")
     else:
         cur.execute("SELECT MAX(date) FROM gold.regime_features")
         feat_max = cur.fetchone()[0]
-        cur.execute("SELECT MAX(date) FROM deriv.regime_label_wf WHERE series_version = 'wf_v1'")
+        cur.execute("SELECT MAX(date) FROM deriv.regime_label_wf WHERE series_version = %s",
+                    (WF_SERIES,))
         wf_max = cur.fetchone()[0]
         target = min(exp_wf, feat_max) if feat_max else exp_wf
         if feat_max is None or feat_max < exp_wf:
             alert(f"REGIME_WF UPSTREAM STALE: gold.regime_features max={feat_max} < expected {exp_wf} "
                   "— 22:30 yf_us_postclose_topup gold_builder stages lagging")
         if wf_max is None:
-            alert("REGIME_WF EMPTY: deriv.regime_label_wf has no wf_v1 rows")
+            alert(f"REGIME_WF EMPTY: deriv.regime_label_wf has no {WF_SERIES} rows")
         elif wf_max < target:
-            alert(f"REGIME_WF STALE: deriv.regime_label_wf max={wf_max} < expected {target} "
-                  f"(today_ET={today_et}) — 23:15 regime_wf_daily absent or failed")
+            alert(f"REGIME_WF STALE: deriv.regime_label_wf {WF_SERIES} max={wf_max} < expected {target} "
+                  f"(today_ET={today_et}) — 23:15 regime_wf_daily absent or failed; "
+                  "V1 forward gate has no nightly label")
+
+        # Read-only calendar-completeness check (defense in depth): the 23:15
+        # builder hard-fails on the same asymmetries, but catching them at
+        # 01:00 leaves a full day to fix before the nightly run. Trailing
+        # 400d window keeps this cheap; the builder's gate covers the full span.
+        cal_lo = (now_utc.date() - timedelta(days=400)).isoformat()
+        cal_hi = (exp_wf or now_utc.date()).isoformat()
+        for a, b in (("SPY", "^VIX"), ("^VIX", "SPY")):
+            cur.execute("""
+                SELECT d.date FROM gold.daily_ohlcv d
+                WHERE d.ticker = %s AND d.date BETWEEN %s AND %s
+                  AND NOT EXISTS (SELECT 1 FROM gold.daily_ohlcv e
+                                  WHERE e.ticker = %s AND e.date = d.date)
+                ORDER BY 1""", (a, cal_lo, cal_hi, b))
+            miss = [str(r[0]) for r in cur.fetchall()]
+            if miss:
+                alert(f"REGIME_WF CALENDAR: {a} days missing from {b} (trailing 400d): "
+                      f"{miss[:10]}{'...' if len(miss) > 10 else ''}")
+        cur.execute("""
+            SELECT d.date FROM gold.daily_ohlcv d
+            WHERE d.ticker='SPY' AND d.date BETWEEN %s AND %s
+              AND NOT EXISTS (SELECT 1 FROM gold.regime_features f WHERE f.date=d.date)
+            ORDER BY 1""", (cal_lo, cal_hi))
+        m = [str(r[0]) for r in cur.fetchall()]
+        if m:
+            alert(f"REGIME_WF CALENDAR: SPY days missing from gold.regime_features "
+                  f"(trailing 400d): {m[:10]}{'...' if len(m) > 10 else ''}")
+        cur.execute("""
+            SELECT f.date FROM gold.regime_features f
+            WHERE f.date BETWEEN %s AND %s
+              AND NOT EXISTS (SELECT 1 FROM gold.daily_ohlcv d
+                              WHERE d.ticker='SPY' AND d.date=f.date)
+            ORDER BY 1""", (cal_lo, cal_hi))
+        x = [str(r[0]) for r in cur.fetchall()]
+        if x:
+            alert(f"REGIME_WF CALENDAR: regime_features rows on non-SPY days "
+                  f"(trailing 400d): {x[:10]}{'...' if len(x) > 10 else ''}")
 
     # ── 3. option vol features (23:05 UTC Mon-Fri) ────────────────────────────
     # Expected freshness tracks the OPTIONS chain (features dated T are built
@@ -350,6 +512,86 @@ def main():
     # ── 4-7. account-value deadman (staleness, NAV jump, currency sanity) ────
     acct_state = fetch_account_state(cur)
     check_account_values(acct_state, now_utc, weekday_utc)
+
+    # ── 8. gold.daily_ohlcv per-ticker contiguity (gap_remediation_v1 step 3) ─
+    check_gold_contiguity(cur, now_utc.date())
+
+    # ── 9. NaN/Inf scan (2026-10-16 user directive; spec:
+    #    docs/DEADMAN_GOLD_WRITE_TIME_VALIDATION_SPEC_2026-10-16.md) ──────────
+    # Numeric columns are scanned for the text forms Postgres produces for
+    # non-finite numerics ('NaN', 'Infinity', '-Infinity'). Trailing 45d on the
+    # big tables keeps this cheap; structural warm-up NaNs in regime_features
+    # are excluded by the window.
+    nan_tables = {
+        "gold.daily_ohlcv": ("date", ["open", "high", "low", "close",
+                                      "adjusted_close", "returns_1d"]),
+        "gold.regime_features": ("date", ["adx14", "hurst_30", "rv5d",
+                                          "rv_iv_ratio", "vix_z60",
+                                          "adx_hurst_cross", "rv5d_change"]),
+        "gold.option_vol_features_daily": ("feature_date", None),  # all numeric
+    }
+    for tbl, (dcol, cols) in nan_tables.items():
+        try:
+            if cols is None:
+                cur.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema=%s AND table_name=%s AND data_type IN "
+                    "('numeric','double precision','real')",
+                    tuple(tbl.split('.')))
+                cols = [r[0] for r in cur.fetchall()]
+            if not cols:
+                continue
+            sums = ", ".join(
+                f"count(*) FILTER (WHERE \"{c}\"::text IN "
+                f"('NaN','Infinity','-Infinity','inf','-inf')) AS \"{c}\""
+                for c in cols)
+            cur.execute(
+                f"SELECT {sums} FROM {tbl} "
+                f"WHERE {dcol} >= CURRENT_DATE - 45")
+            res = cur.fetchone()
+            hits = {c: res[i] for i, c in enumerate(cols) if res[i]}
+            if hits:
+                alert(f"NAN/INF: {tbl} trailing-45d non-finite counts {hits}")
+        except Exception as e:
+            conn.rollback()
+            alert(f"NAN/INF SCAN ERROR: {tbl}: {e}")
+
+    # ── 10. signal freshness vs rebalance schedule (2026-10-16 directive) ────
+    # NOTE: strategy_ticker_scores has no computed_at column (see
+    # workspace/strategy_audit/etf_tsmom_basket_07_2026-10-16.md) — updated_at
+    # is the freshness proxy. A strategy whose cadence gate fired (a
+    # strategy_rebalance_state row updated inside its current period) but whose
+    # scores predate the period start traded on STALE scores.
+    try:
+        cur.execute("""
+            WITH active AS (
+                SELECT strategy_id, frequency
+                FROM gold.strategy_registry
+                WHERE status = 'paper'
+            ),
+            latest_reb AS (
+                SELECT strategy_id, max(last_rebalance_date) AS last_reb,
+                       max(updated_at) AS state_updated
+                FROM gold.strategy_rebalance_state GROUP BY 1
+            )
+            SELECT a.strategy_id, a.frequency, l.last_reb,
+                   s.max_upd
+            FROM active a
+            JOIN latest_reb l ON l.strategy_id = a.strategy_id
+            JOIN (SELECT strategy_id, max(updated_at) AS max_upd
+                  FROM gold.strategy_ticker_scores GROUP BY 1) s
+              ON s.strategy_id = a.strategy_id
+            WHERE l.last_reb IS NOT NULL
+              AND s.max_upd < l.last_reb
+            ORDER BY l.last_reb DESC""")
+        stale = cur.fetchall()
+        for sid, freq, last_reb, max_upd in stale:
+            alert(f"SIGNAL STALE: {sid} ({freq}) rebalanced {last_reb} but "
+                  f"strategy_ticker_scores max(updated_at)={max_upd} predates it "
+                  "— rebalance traded on stale scores")
+    except Exception as e:
+        conn.rollback()
+        alert(f"SIGNAL FRESHNESS SCAN ERROR: {e}")
 
     finish(now_utc)
 

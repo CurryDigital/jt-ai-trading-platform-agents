@@ -34,6 +34,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MANIFEST = os.path.join(HERE, "pipeline_manifest.json")
@@ -174,9 +175,19 @@ def main() -> int:
     manifest = load_manifest(args.manifest)
     steps = select_steps(manifest, args.cadence, args.stage)
 
+    # Snapshot policy (2026-10-16): full-history writers (e.g.
+    # silver/clean_unified_prices.py) refuse to run without a snapshot/run id.
+    # Scheduled run_stage executions carry one automatically; manual restates
+    # must pass their own backup snapshot id to the writer directly.
+    run_snapshot_id = os.environ.setdefault(
+        "ETL_RUN_SNAPSHOT_ID",
+        f"run_{args.cadence}_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}",
+    )
+
     print("=" * 60)
     print(f"run_stage: cadence={args.cadence} stage={args.stage or 'ALL'} "
           f"— {len(steps)} step(s){' [DRY RUN]' if args.dry_run else ''}")
+    print(f"run_stage: ETL_RUN_SNAPSHOT_ID={run_snapshot_id}")
     print("=" * 60)
 
     # ok/failed lists per stage, for the honest state writer.
@@ -205,7 +216,6 @@ def main() -> int:
         try:
             sys.path.insert(0, HERE)
             from write_pipeline_state import decide_state
-            from datetime import datetime, timezone
             state = decide_state(
                 ok["bronze"], failed["bronze"], ok["silver"], failed["silver"],
                 ok["gold"], failed["gold"], ok["consumption"], failed["consumption"],
