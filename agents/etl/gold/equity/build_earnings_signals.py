@@ -42,7 +42,10 @@ ON CONFLICT (symbol, earnings_date) DO UPDATE SET
   surprise_category   = EXCLUDED.surprise_category,
   signal_window_start = EXCLUDED.signal_window_start,
   signal_window_end   = EXCLUDED.signal_window_end,
-  created_at          = NOW();
+  created_at          = NOW()
+-- 2026-10-17: don't blanket-restamp unchanged rows (destroys vintage).
+WHERE gold.earnings_signals.eps_surprise_pct  IS DISTINCT FROM EXCLUDED.eps_surprise_pct
+   OR gold.earnings_signals.surprise_category IS DISTINCT FROM EXCLUDED.surprise_category;
 """
 
 SQL_DATA = """
@@ -58,7 +61,11 @@ ON CONFLICT (ticker, report_date) DO UPDATE SET
   actual_eps     = EXCLUDED.actual_eps,
   estimate_eps   = EXCLUDED.estimate_eps,
   surprise_pct   = EXCLUDED.surprise_pct,
-  collected_at   = NOW();
+  collected_at   = NOW()
+-- 2026-10-17: don't blanket-restamp unchanged rows.
+WHERE gold.earnings_data.actual_eps   IS DISTINCT FROM EXCLUDED.actual_eps
+   OR gold.earnings_data.estimate_eps IS DISTINCT FROM EXCLUDED.estimate_eps
+   OR gold.earnings_data.surprise_pct IS DISTINCT FROM EXCLUDED.surprise_pct;
 """
 
 SQL_SUE = """

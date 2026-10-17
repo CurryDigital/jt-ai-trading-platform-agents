@@ -332,7 +332,14 @@ def check_gold_contiguity(cur, today_utc):
     # or after the delist date; skip when the ticker's last in-window row is
     # before it. WBD: acquired by Paramount Skydance, completed 2026-10-06
     # (stock last traded 2026-10-05; Form 25 filed ~10-06).
-    KNOWN_DELISTED = {'WBD': date(2026, 10, 6)}
+    # 2026-10-17: HOLX (Blackstone/TPG take-private completed 2026-04-07),
+    # CTRA (Devon merger closed ~2026-05-07, deregistered), MATIC-USD
+    # (migrated to POL 2024-09). All three marked is_active=false in
+    # gold.asset_registry the same day.
+    KNOWN_DELISTED = {'WBD': date(2026, 10, 6),
+                      'HOLX': date(2026, 4, 8),
+                      'CTRA': date(2026, 5, 8),
+                      'MATIC-USD': date(2024, 9, 4)}
     for t, dd in KNOWN_DELISTED.items():
         info = by_ticker.get(t)
         if info and max(info['dates']) < dd:
@@ -581,11 +588,10 @@ def main():
             alert(f"NAN/INF SCAN ERROR: {tbl}: {e}")
 
     # ── 10. signal freshness vs rebalance schedule (2026-10-16 directive) ────
-    # NOTE: strategy_ticker_scores has no computed_at column (see
-    # workspace/strategy_audit/etf_tsmom_basket_07_2026-10-16.md) — updated_at
-    # is the freshness proxy. A strategy whose cadence gate fired (a
-    # strategy_rebalance_state row updated inside its current period) but whose
-    # scores predate the period start traded on STALE scores.
+    # Reads the strategy's OWN compute time first: computed_at (from the live-
+    # signals file's generated_at, migration 2026-10-17), falling back to
+    # updated_at. updated_at alone is NOT trustworthy — a trigger re-stamps it
+    # on ANY update (e.g. the 2026-10-17 computed_at backfill moved 62 rows).
     try:
         cur.execute("""
             WITH active AS (
@@ -599,14 +605,15 @@ def main():
                 FROM gold.strategy_rebalance_state GROUP BY 1
             )
             SELECT a.strategy_id, a.frequency, l.last_reb,
-                   s.max_upd
+                   s.max_fresh
             FROM active a
             JOIN latest_reb l ON l.strategy_id = a.strategy_id
-            JOIN (SELECT strategy_id, max(updated_at) AS max_upd
+            JOIN (SELECT strategy_id,
+                         max(COALESCE(computed_at, updated_at)) AS max_fresh
                   FROM gold.strategy_ticker_scores GROUP BY 1) s
               ON s.strategy_id = a.strategy_id
             WHERE l.last_reb IS NOT NULL
-              AND s.max_upd < l.last_reb
+              AND s.max_fresh::date < l.last_reb
             ORDER BY l.last_reb DESC""")
         stale = cur.fetchall()
         for sid, freq, last_reb, max_upd in stale:
