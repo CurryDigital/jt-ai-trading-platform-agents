@@ -372,13 +372,16 @@ def check_gold_contiguity(cur, today_utc):
 
     for m, off in sorted(offenders.items()):
         off.sort(key=lambda x: -x[1])
-        listed = "; ".join(f"{t}:{n}d({a}..{b})" for t, n, a, b
-                           in off[:GAP_ALERT_MAX_LIST])
-        more = f" +{len(off) - GAP_ALERT_MAX_LIST} more" \
-            if len(off) > GAP_ALERT_MAX_LIST else ""
-        alert(f"GOLD GAP: {len(off)} {m} tickers missing >allowance weekdays "
-              f"in trailing {GAP_WINDOW_DAYS}d (as of {last_expect}): "
-              f"{listed}{more} — possible ingest hole like 2026-03")
+        # Per-ticker alert lines (2026-10-18): ack-able via gold.deadman_acks
+        # with key 'GOLD GAP <ticker>:' — an acknowledged known hole stays
+        # silent until expiry; a NEW gaping ticker alerts immediately.
+        for t, n, a, b in off[:GAP_ALERT_MAX_LIST]:
+            alert(f"GOLD GAP {t}: {n}d missing ({a}..{b}) {m} in trailing "
+                  f"{GAP_WINDOW_DAYS}d (as of {last_expect}) — possible ingest hole")
+        if len(off) > GAP_ALERT_MAX_LIST:
+            alert(f"GOLD GAP: +{len(off) - GAP_ALERT_MAX_LIST} more {m} tickers "
+                  f"beyond the listed {GAP_ALERT_MAX_LIST} (trailing "
+                  f"{GAP_WINDOW_DAYS}d as of {last_expect})")
 
 
 def main():
