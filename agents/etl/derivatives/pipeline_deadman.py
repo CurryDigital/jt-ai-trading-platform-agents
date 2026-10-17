@@ -66,6 +66,8 @@ sys.path.insert(0, "/home/ubuntu/.hermes/profiles/qr_etl/home/trading-platform/a
 import db  # noqa: E402
 
 ALERTS = []
+NOTES = []   # suppressed-by-ack alerts, echoed to stderr for the log
+ACKS = {}    # alert_key -> (reason, expires); loaded in main()
 
 # ── gold.daily_ohlcv per-ticker contiguity (kanban: gap_remediation_v1 step 3) ─
 # A max(date) freshness check never sees a mid-history hole (the March 2026
@@ -94,7 +96,28 @@ FX_TICKER = os.environ.get("ACCT_FX_TICKER", "USDHKD=X")
 
 
 def alert(msg):
+    # Acknowledged-alert registry (gold.deadman_acks, 2026-10-17 directive):
+    # an alert whose text starts with an unexpired acked key is suppressed to
+    # a NOTE (stderr, not exit-1). Expired acks re-arm automatically, so a
+    # known-bad condition cannot stay silent past its approved window. Any
+    # NEW condition has no ack row and alerts normally.
+    for key, (reason, expires) in ACKS.items():
+        if msg.startswith(key):
+            NOTES.append(f"ACKED (until {expires}): {msg} — {reason}")
+            return
     ALERTS.append(msg)
+
+
+def load_acks(cur):
+    """gold.deadman_acks -> {alert_key: (reason, expires)} for unexpired rows.
+    Missing table (pre-migration) = empty registry, everything alerts."""
+    try:
+        cur.execute("SELECT alert_key, reason, expires FROM gold.deadman_acks "
+                    "WHERE expires >= CURRENT_DATE")
+        return {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    except Exception:
+        cur.connection.rollback()  # clear aborted-tx state on missing table
+        return {}
 
 
 # ── account-value deadman: fetch + pure-check split (testable) ───────────────
@@ -357,6 +380,7 @@ def main():
     weekday_utc = now_utc.date().weekday()  # Mon=0
 
     conn = db.get_connection()
+    ACKS.update(load_acks(conn.cursor()))
     cur = conn.cursor()
 
     # ── oracle: SPY trading days ──────────────────────────────────────────────
@@ -597,6 +621,9 @@ def main():
 
 
 def finish(now_utc):
+    for n in NOTES:
+        print(f"NOTE deriv_deadman: {n} [{now_utc:%Y-%m-%dT%H:%M:%SZ}]",
+              file=sys.stderr)
     if ALERTS:
         for a in ALERTS:
             print(f"ALERT deriv_deadman: {a} [{now_utc:%Y-%m-%dT%H:%M:%SZ}]")

@@ -91,6 +91,13 @@ def promote_ibkr_positions():
             continue
         
         try:
+            # 2026-10-17 (phantom-rows audit): position marks are NOT price
+            # bars. Never write a mark on a weekend, never overwrite a real
+            # (non-ibkr_position) bar, and never create a bar on a US holiday
+            # for US-listed tickers. Marks only fill dates no feed covered.
+            mark_date = fetched_at.date() if fetched_at else datetime.now(timezone.utc).date()
+            if mark_date.isoweekday() in (6, 7):
+                continue
             cur.execute("""
                 INSERT INTO silver.unified_prices
                     (ticker, date, open, high, low, close, volume, source, adjusted_close, created_at)
@@ -103,9 +110,11 @@ def promote_ibkr_positions():
                     volume = EXCLUDED.volume,
                     source = EXCLUDED.source,
                     adjusted_close = EXCLUDED.adjusted_close
+                WHERE silver.unified_prices.source = 'ibkr_position'
+                   OR silver.unified_prices.close IS NULL
             """, (
                 ticker,
-                fetched_at.date() if fetched_at else datetime.now(timezone.utc).date(),
+                mark_date,
                 market_price, market_price, market_price, market_price,
                 abs(qty) if qty else 0,
                 'ibkr_position',
