@@ -123,32 +123,40 @@ def resolve_strategy_id(conn, strategy_name: str):
 def ensure_strategy_registry(conn, strategy_id, strategy_name, asset_class,
                              signal_file_path, tickers):
     cur = conn.cursor()
+    # Test hook: sandbox copies point REGISTRY_TABLE_OVERRIDE at a scratch
+    # table (e.g. 'sandbox_p1.strategy_registry'). Production never sets it.
+    reg = os.environ.get("REGISTRY_TABLE_OVERRIDE", "gold.strategy_registry")
     # If caller didn't override asset_class, preserve the registry's value.
     if asset_class is None:
         cur.execute(
-            "SELECT asset_class FROM gold.strategy_registry WHERE strategy_id = %s",
+            f"SELECT asset_class FROM {reg} WHERE strategy_id = %s",
             (strategy_id,),
         )
         row = cur.fetchone()
         asset_class = row[0] if row and row[0] else "US Stock"
+    # 2026-10-18 (P1): NEVER write universe_tickers from an ingest. `tickers`
+    # here is the signal file's PICK LIST, not the universe — overwriting the
+    # pinned universe with it shrank all five ingested sleeves (512→20 etc.)
+    # when qr_research's integration test ingested a short pick list. Universe
+    # membership changes go through an explicit registry update only. The
+    # INSERT branch (brand-new strategy) still seeds it once.
     cur.execute(
-        """
-        UPDATE gold.strategy_registry
+        f"""
+        UPDATE {reg}
         SET asset_class      = COALESCE(%s, asset_class),
             execution_mode   = 'PAPER',
             status           = 'paper',
-            universe_tickers = %s,
             signal_file_path = %s,
             updated_at       = NOW(),
             last_signal_at   = NOW()
         WHERE strategy_id = %s;
         """,
-        (asset_class, tickers, signal_file_path, strategy_id),
+        (asset_class, signal_file_path, strategy_id),
     )
     if cur.rowcount == 0:
         cur.execute(
-            """
-            INSERT INTO gold.strategy_registry
+            f"""
+            INSERT INTO {reg}
               (strategy_id, name, asset_class, execution_mode, status,
                universe_tickers, signal_file_path, updated_at, last_signal_at)
             VALUES (%s, %s, %s, 'PAPER', 'paper', %s, %s, NOW(), NOW());
@@ -156,7 +164,7 @@ def ensure_strategy_registry(conn, strategy_id, strategy_name, asset_class,
             (strategy_id, strategy_name, asset_class or "US Stock", tickers, signal_file_path),
         )
     conn.commit()
-    print(f"{now_hkt()} ✅ gold.strategy_registry updated for {strategy_id}")
+    print(f"{now_hkt()} ✅ {reg} updated for {strategy_id} (universe_tickers untouched)")
 
 
 def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, metrics=None):

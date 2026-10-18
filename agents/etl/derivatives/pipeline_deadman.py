@@ -627,6 +627,30 @@ def main():
         conn.rollback()
         alert(f"SIGNAL FRESHNESS SCAN ERROR: {e}")
 
+    # ── 11. pinned universe sizes (P1, 2026-10-18) ───────────────────────────
+    # ingest_paper_signal no longer writes universe_tickers (it used to
+    # overwrite the pinned universe with the pick list — qr_research's
+    # integration test shrank all five sleeves 512→20). Expected sizes live
+    # in gold.strategy_configs config_key='expected_universe_size'; any drift
+    # alerts, ack-able per strategy as 'UNIVERSE SIZE <sid>:'.
+    try:
+        cur.execute("""
+            SELECT r.strategy_id, array_length(r.universe_tickers, 1),
+                   c.config_value::int
+            FROM gold.strategy_registry r
+            JOIN gold.strategy_configs c
+              ON c.strategy_id = r.strategy_id
+             AND c.config_key = 'expected_universe_size'
+            WHERE r.status = 'paper'""")
+        for sid, actual, expected in cur.fetchall():
+            if actual != expected:
+                alert(f"UNIVERSE SIZE {sid}: pinned universe is {actual} "
+                      f"tickers, expected {expected} (strategy_configs) — "
+                      "universe must only change via explicit registry update")
+    except Exception as e:
+        conn.rollback()
+        alert(f"UNIVERSE SIZE SCAN ERROR: {e}")
+
     finish(now_utc)
 
 
