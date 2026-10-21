@@ -35,13 +35,13 @@ if [ ! -f "${ENV_FILE}" ]; then
 fi
 set -a && source "${ENV_FILE}" && set +a
 
-PYTHON="/home/ubuntu/.hermes/hermes-agent/venv/bin/python3"
+PYTHON="/home/ubuntu/.hermes/etl-venv/bin/python3"
 if [ ! -f "${PYTHON}" ]; then
-    echo "FATAL: Hermes venv Python not found at ${PYTHON}"
+    echo "FATAL: ETL venv Python not found at ${PYTHON}"
     exit 65
 fi
 if ! "${PYTHON}" -c "import psycopg2, dotenv" 2>/dev/null; then
-    echo "FATAL: Hermes venv missing psycopg2 or python-dotenv. Run bootstrap_hermes_venv.sh."
+    echo "FATAL: ETL venv missing psycopg2 or python-dotenv. Run the ETL venv bootstrap."
     exit 70
 fi
 
@@ -144,8 +144,77 @@ run_pipeline_step "Strategy scores" "pipeline/build_strategy_scores.py"
 # quarantined). Resolves strategy_id by name from the registry; unknown
 # names are reported and skipped, never invented. Override the directory
 # with QR_RESEARCH_SIGNAL_DIR.
-QR_SIGNAL_DIR="${QR_RESEARCH_SIGNAL_DIR:-/home/ubuntu/.hermes/profiles/qr_research/workspace}"
-run_pipeline_step "Paper-signal ingest (all)" "pipeline/ingest_paper_signal.py" --signal-dir "${QR_SIGNAL_DIR}"
+# 2026-07-30 registry gate: after the 2026-07-29 migration of 19 strategies
+# ingested -> computed, NO active strategy consumes qr_research JSON files.
+# Scanning anyway hard-failed the whole cycle whenever the upstream dir was
+# empty (2026-07-29 09:15 cron RED). Only run the ingest when at least one
+# non-retired, non-paused strategy still has signal_mechanism='ingested';
+# otherwise skip cleanly. ingest_paper_signal.py remains available.
+INGESTED_ACTIVE=$("${PYTHON}" -c "
+import sys
+sys.path.insert(0, '${ETL_SHARED}')
+try:
+    from db import get_connection
+    conn = get_connection()
+    with conn.cursor() as cur:
+        cur.execute('''SELECT COUNT(*) FROM gold.strategy_registry
+            WHERE signal_mechanism = 'ingested'
+              AND status NOT IN ('retired', 'paused')''')
+        print(cur.fetchone()[0])
+    conn.close()
+except Exception as e:
+    print(f'error:{e}', file=sys.stderr)
+    print(-1)
+" 2>/dev/null || echo -1)
+
+echo "Active ingested strategies: ${INGESTED_ACTIVE}"
+if [ "${INGESTED_ACTIVE}" = "0" ]; then
+    echo "⏸️  Paper-signal ingest (all) skipped — no active strategies with signal_mechanism='ingested'"
+else
+    # -1 = registry probe failed: fail open (run the ingest) so a real
+    # consumer is never starved by a transient DB hiccup.
+    QR_SIGNAL_DIR="${QR_RESEARCH_SIGNAL_DIR:-/home/ubuntu/.hermes/profiles/qr_research/workspace}"
+    run_pipeline_step "Paper-signal ingest (all)" "pipeline/ingest_paper_signal.py" --signal-dir "${QR_SIGNAL_DIR}"
+fi
+
+# 1b. Computed rotation-signal engine — regenerates gold.strategy_ticker_scores
+#     for every paper strategy with signal_mechanism='computed' (incl. the 19
+#     strategies migrated from ingested -> computed 2026-07-29). Runs AFTER the
+#     ingest scan so computed rows are the final writer; ingest_paper_signal.py
+#     skips any strategy whose registry signal_mechanism is not 'ingested'.
+run_pipeline_step "Rotation signals (computed)" "pipeline/build_rotation_signals.py"
+
+# 1c. HK IPO post-listing drift V3 — RETIRED 2026-09-18 (kanban t_ff7513a4,
+#     2026-09-18 strategy review). Registry status='retired',
+#     disable_paper_rebuild=TRUE; generator script
+#     agents/etl/gold/strategy/hk_ipo_postlisting_drift_p1_v3_daily.py kept on
+#     disk for audit but is no longer invoked here.
+echo "⏸️  HK IPO drift V3 signal generation skipped — strategy RETIRED 2026-09-18 (t_ff7513a4)"
+
+# 1d. HK IPO day-1 green momentum V1 — RETIRED 2026-09-15 (kanban t_fd837e85).
+#     Research verdict: lottery-type edge (6 tail winners = +216.7pp vs 11 trades
+#     net -44.6pp), OOS t-stat 1.67 below bar, last-6m cohort t-stat 0.73.
+#     Registry status='retired', disable_paper_rebuild=TRUE; generator script
+#     agents/etl/gold/strategy/hk_ipo_day1_green_momentum_v1_daily.py kept on
+#     disk for audit but is no longer invoked here.
+echo "⏸️  HK IPO day1-green V1 signal generation skipped — strategy RETIRED 2026-09-15 (t_fd837e85)"
+
+# 1e. US VIX-spike crisis event V3 (kanban t_de0986e1) — event-driven
+#     GLD/SPY 50/50 crisis sleeve; own daily generator replays the research
+#     engine (vix_z60 cross >=+2, re-arm <1, next-bar-close entry, +20td
+#     time exit, first-wins) with a hard seed assertion against
+#     gold.strategy_backtest_trades. OBSERVER-ONLY (user HOLD 2026-09-23,
+#     c1 pattern): assigned_capital=$0.00 so the rebalancer sizes every
+#     position to 0 — signal flow runs for validation only, no paper
+#     capital. build_rotation_signals.py skips it (no engine config), so
+#     this script is the final writer of its ticker_scores.
+VIX_EVENT_GEN="${SIGNALS_DIR}/../etl/gold/strategy/us_vix_spike_crisis_event_v3_daily.py"
+if [ -f "${VIX_EVENT_GEN}" ]; then
+    run_pipeline_step "VIX-spike event V3 signals (observer)" "${VIX_EVENT_GEN}"
+else
+    echo "⚠️ VIX-spike event generator not found at ${VIX_EVENT_GEN} — skipping"
+    PIPELINE_FAILURES+=("vix_spike_event_v3_missing")
+fi
 
 # 2. S9 MACD daily signal generation
 run_pipeline_step "S9 MACD signals" "pipeline/s9_macd_daily.py"
@@ -193,6 +262,11 @@ run_pipeline_step "Signal history snapshot" "pipeline/snapshot_ticker_scores.py"
 # synthetic from gold.strategy_ticker_scores + silver.unified_prices.
 # Enforces one open position per (strategy_id, ticker) and one signal per
 # (strategy_id, ticker) at the DB level.
+# Cadence gate (t_68b07c59): this step runs EVERY cycle so signal generation
+# stays daily and idempotent, but position mutations are gated inside the
+# engine on gold.strategy_registry.frequency — weekly/monthly strategies only
+# close/open on the first run of a new ISO-week/calendar-month (state in
+# gold.strategy_rebalance_state); daily/event strategies rebalance every run.
 REBALANCER="${SIGNALS_DIR}/../etl/gold/strategy/rebuild_paper_positions.py"
 if [ -f "${REBALANCER}" ]; then
     run_pipeline_step "Position-aware paper rebalancer" "${REBALANCER}"
@@ -201,13 +275,46 @@ else
     PIPELINE_FAILURES+=("rebalancer_missing")
 fi
 
+# ── Sync paper positions into consumption.portfolio_positions_current ─────
+# The /api/strategies/{id}/capital-pool endpoint reads SUM(capital)/COUNT(*)
+# from that table; without this step every paper strategy reports Used=$0.
+# Must run AFTER the rebalancer so it sees today's open ledger positions.
+PAPER_POS_SYNC="${SIGNALS_DIR}/../etl/consumption/portfolio/sync_paper_positions_current.py"
+if [ -f "${PAPER_POS_SYNC}" ]; then
+    run_pipeline_step "Paper positions → portfolio_positions_current" "${PAPER_POS_SYNC}"
+else
+    echo "⚠️ Paper position sync not found at ${PAPER_POS_SYNC} — skipping"
+    PIPELINE_FAILURES+=("paper_position_sync_missing")
+fi
+
+# ── Sync registry in_market_capital from the canonical paper ledger ─────
+# t_9579ff7c: registry bookkeeping was write-once at promotion and drifted
+# from the actual paper book. Recompute in_market_capital from
+# gold.paper_trades_synthetic (open rows) for monitored PAPER strategies,
+# zero it for unmonitored/retired PAPER rows. Must run AFTER the rebalancer.
+REGISTRY_IN_MARKET_SYNC="${SIGNALS_DIR}/../etl/gold/strategy/sync_registry_in_market_capital.py"
+if [ -f "${REGISTRY_IN_MARKET_SYNC}" ]; then
+    run_pipeline_step "Registry in_market_capital sync" "${REGISTRY_IN_MARKET_SYNC}"
+else
+    echo "⚠️ Registry in_market sync not found at ${REGISTRY_IN_MARKET_SYNC} — skipping"
+    PIPELINE_FAILURES+=("registry_in_market_sync_missing")
+fi
+
 if [ ${#PIPELINE_FAILURES[@]} -gt 0 ]; then
     echo "⚠️ Signal pipeline failures: ${PIPELINE_FAILURES[*]}"
+fi
+
+FINAL_RC=${RC}
+if [ ${RC} -eq 0 ] && [ ${#PIPELINE_FAILURES[@]} -gt 0 ]; then
+    echo "❌ Hard-failing because of pipeline failures: ${PIPELINE_FAILURES[*]}"
+    FINAL_RC=1
 fi
 
 echo "=========================================="
 echo "SIGNAL CYCLE COMPLETED: $(date)"
 echo "run_signals.py exit code: ${RC}"
+echo "pipeline failures: ${#PIPELINE_FAILURES[@]}"
+echo "final exit code: ${FINAL_RC}"
 echo "Log: ${LOG_FILE}"
 echo "=========================================="
-exit ${RC}
+exit ${FINAL_RC}

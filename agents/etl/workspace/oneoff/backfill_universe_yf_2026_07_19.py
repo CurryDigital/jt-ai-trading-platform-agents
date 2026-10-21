@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""One-off yfinance backfill for universe tickers to close gaps in 300-day window."""
+"""One-off yfinance backfill for universe tickers to close gaps in 300-day window.
+
+2026-07-29 FIX (kanban t_034b61f0): the row tuples below were built as
+(open, high, low, close, ADJ_CLOSE, VOLUME) while the INSERT column list is
+(ticker, date, open, high, low, close, VOLUME, ADJUSTED_CLOSE, ingested_at).
+The positional swap wrote volume into adjusted_close and Adj Close into volume
+for 115 tickers x 379 rows (2025-01-02..2026-07-09). Tuples now match the
+column list: (open, high, low, close, volume, adjusted_close).
+DO NOT RE-RUN this script without re-verifying column order against the INSERT.
+"""
 import sys, os
 from datetime import datetime, date, timedelta
 sys.path.insert(0, '/home/ubuntu/.hermes/profiles/qr_etl/home/trading-platform/agents/etl/shared/scripts')
@@ -38,8 +47,9 @@ def fetch_batch(tickers, start, end):
                 float(row['High']) if 'High' in row and row['High'] is not None and str(row['High']) != 'nan' else None,
                 float(row['Low']) if 'Low' in row and row['Low'] is not None and str(row['Low']) != 'nan' else None,
                 float(row['Close']) if 'Close' in row and row['Close'] is not None and str(row['Close']) != 'nan' else None,
-                float(row['Adj Close']) if 'Adj Close' in row and row['Adj Close'] is not None and str(row['Adj Close']) != 'nan' else None,
+                # column list order: (..., close, volume, adjusted_close, ingested_at)
                 int(row['Volume']) if 'Volume' in row and row['Volume'] is not None and str(row['Volume']) != 'nan' else None,
+                float(row['Adj Close']) if 'Adj Close' in row and row['Adj Close'] is not None and str(row['Adj Close']) != 'nan' else None,
             ))
     else:
         if data.empty:
@@ -57,8 +67,9 @@ def fetch_batch(tickers, start, end):
                     float(data[('High', t)][idx]) if ('High', t) in data and data[('High', t)][idx] is not None and str(data[('High', t)][idx]) != 'nan' else None,
                     float(data[('Low', t)][idx]) if ('Low', t) in data and data[('Low', t)][idx] is not None and str(data[('Low', t)][idx]) != 'nan' else None,
                     float(close),
-                    float(data[('Adj Close', t)][idx]) if ('Adj Close', t) in data and data[('Adj Close', t)][idx] is not None and str(data[('Adj Close', t)][idx]) != 'nan' else float(close),
+                    # column list order: (..., close, volume, adjusted_close, ingested_at)
                     int(data[('Volume', t)][idx]) if ('Volume', t) in data and data[('Volume', t)][idx] is not None and str(data[('Volume', t)][idx]) != 'nan' else None,
+                    float(data[('Adj Close', t)][idx]) if ('Adj Close', t) in data and data[('Adj Close', t)][idx] is not None and str(data[('Adj Close', t)][idx]) != 'nan' else float(close),
                 ))
     return rows
 

@@ -24,19 +24,38 @@ except ImportError:
     print("⚠️  requests not installed — run: pip install requests")
     sys.exit(1)
 
-BASE_URL = 'https://api.coinbase.com/api/v3/brokerage'
+# 2026-08-20: Advanced Trade /brokerage candles now return 401 without CDP
+# API keys. Switched to the public Exchange API (no auth) — same OHLCV data,
+# different wire format (arrays, granularity in seconds, ISO8601 times).
+BASE_URL = 'https://api.exchange.coinbase.com'
 
 DEFAULT_PRODUCTS  = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'BNB-USD', 'XRP-USD']
-GRANULARITY_MAP = {
-    '1d': 'ONE_DAY',
-    '6h': 'SIX_HOUR',
-    '1h': 'ONE_HOUR',
+GRANULARITY_MAP = {   # seconds, as the Exchange API expects
+    '1d': 86400,
+    '6h': 21600,
+    '1h': 3600,
 }
 
-def cb_get(path: str, params: dict = None) -> dict:
-    r = requests.get(f"{BASE_URL}/{path.lstrip('/')}", params=params, timeout=20)
+def cb_get(path: str, params: dict = None) -> list:
+    r = requests.get(f"{BASE_URL}/{path.lstrip('/')}", params=params,
+                     headers={'User-Agent': 'qr-etl/1.0'}, timeout=20)
     r.raise_for_status()
     return r.json()
+
+def _norm_candles(raw: list) -> list:
+    """Exchange API returns [time, low, high, open, close, volume] arrays;
+    normalize to the dict shape the insert path was written against."""
+    out = []
+    for a in raw:
+        out.append({
+            'start':  str(a[0]),
+            'low':    a[1],
+            'high':   a[2],
+            'open':   a[3],
+            'close':  a[4],
+            'volume': a[5],
+        })
+    return out
 
 def get_active_products(conn) -> list:
     cur = conn.cursor()
@@ -55,17 +74,18 @@ def ingest_ohlcv(products: list = None, granularity: str = '1d', days_back: int 
 
     cur      = conn.cursor()
     inserted = 0
-    gran     = GRANULARITY_MAP.get(granularity, 'ONE_DAY')
+    failed   = []
+    gran     = GRANULARITY_MAP.get(granularity, 86400)
     start_dt = datetime.now(timezone.utc) - timedelta(days=days_back)
 
     for product_id in products:
         try:
-            data = cb_get(f'products/{product_id}/candles', {
-                'start':       str(int(start_dt.timestamp())),
-                'end':         str(int(datetime.now(timezone.utc).timestamp())),
+            raw = cb_get(f'products/{product_id}/candles', {
+                'start':       start_dt.isoformat(),
+                'end':         datetime.now(timezone.utc).isoformat(),
                 'granularity': gran,
             })
-            candles = data.get('candles', [])
+            candles = _norm_candles(raw)
             for c in candles:
                 ts = datetime.fromtimestamp(int(c['start']), tz=timezone.utc)
                 # Coinbase ticker = product_id stripped of '-USD' suffix
@@ -92,10 +112,18 @@ def ingest_ohlcv(products: list = None, granularity: str = '1d', days_back: int 
                     print(f"    Row error {product_id}: {e}")
         except Exception as e:
             print(f"  Product error {product_id}: {e}")
+            failed.append(product_id)
 
     conn.commit()
     conn.close()
     print(f"✅ bronze.coinbase_crypto_ohlcv — {inserted} rows upserted")
+    # Honest state (2026-08-20): a run where every product failed previously
+    # exited 0 and marked the source fresh with 0 rows — the exact silent-
+    # failure pattern the freshness registry exists to catch.
+    if products and len(failed) == len(products):
+        raise RuntimeError(f"all {len(failed)} products failed: {', '.join(failed[:5])}")
+    if failed:
+        print(f"  ⚠️ {len(failed)}/{len(products)} products failed: {', '.join(failed[:5])}")
 
 
 

@@ -52,6 +52,20 @@ def _execute_sql(label: str, sql: str) -> bool:
 
 
 def build_daily_ohlcv():
+    # asset_class / market provenance (2026-08-24, kanban t_ac502e22):
+    # This stage is a pure passthrough — it NEVER stamps asset_class/market
+    # itself. Values come verbatim from silver.unified_prices, which is stamped
+    # by silver/clean_unified_prices.py via LEFT JOIN silver.asset_registry
+    # (master: gold.asset_registry). The asset registry is the SINGLE SOURCE
+    # OF TRUTH for asset_class/market; do not hardcode class strings here.
+    #
+    # Window caveat: only the last 14 days are re-copied from silver each run.
+    # Rows older than 14 days are NEVER restamped by this builder, so
+    # historical rows written by pre-registry-era builders retain legacy
+    # lowercase/alias values ('equity', 'HK Stock', 'crypto', NULL, ...).
+    # Full-history restamp of gold.daily_ohlcv is handled out-of-band by the
+    # DB task family under kanban t_4a403ac8 — do not widen this window as a
+    # "fix"; the 14-day window is intentional for run cost.
     _execute_sql("gold.daily_ohlcv", """
         INSERT INTO gold.daily_ohlcv
             (ticker, asset_class, market, date, open, high, low, close,
@@ -64,6 +78,24 @@ def build_daily_ohlcv():
           AND high IS NOT NULL
           AND low IS NOT NULL
           AND close IS NOT NULL
+          -- Trading-calendar guard (2026-10-15, kanban t_183d8bb1):
+          -- yfinance periodically emits weekend/holiday artifact rows
+          -- (e.g. 2026-05-16..06-07 weekends, Memorial/Juneteenth 2026)
+          -- that corrupt rolling features (regime_features adx14 NaN).
+          -- Rule: crypto trades 24/7; FX/futures open Sunday evening UTC;
+          -- every other instrument is weekday-only. US-exchange instruments
+          -- are additionally blocked on NYSE full-close holidays
+          -- (gold.us_market_holidays); HK/CN/SG trade on US holidays and are
+          -- not affected.
+          AND (asset_class = 'CRYPTO'
+               OR EXTRACT(ISODOW FROM date) <= 5
+               OR (asset_class IN ('FX', 'COMMODITY') AND EXTRACT(ISODOW FROM date) = 7))
+          AND (date NOT IN (SELECT holiday_date FROM gold.us_market_holidays)
+               OR asset_class IN ('CRYPTO', 'FX', 'COMMODITY', 'CURRENCY')
+               OR (asset_class IN ('STOCK', 'ETF', 'INDEX', 'VOLATILITY') AND market IS DISTINCT FROM 'US')
+               OR (asset_class IS NULL
+                   AND (ticker ~ '\.(HK|SI|SS|SZ)$' OR ticker LIKE '%-USD'
+                        OR ticker LIKE '%=X' OR ticker LIKE '%=F' OR ticker LIKE '^%')))
         ON CONFLICT (ticker, date) DO UPDATE SET
             asset_class = EXCLUDED.asset_class,
             market = EXCLUDED.market,
@@ -233,7 +265,35 @@ def build_regime_label():
 
 
 if __name__ == "__main__":
-    build_all()
+    # 2026-08-19 (kanban t_817e5f40): --stages lets the 22:30 UTC US
+    # post-close top-up rebuild only the price-driven gold tables after the
+    # evening US-equity ingest, without re-running the HMM/regime stages.
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--stages', default=None,
+                    help="Comma-separated stage subset: daily_ohlcv, vix_regime, "
+                         "macro_flags, funding, cot, regime_features, hmm, regime_label. "
+                         "Default: all stages.")
+    args = ap.parse_args()
+    if args.stages:
+        stage_map = {
+            'daily_ohlcv': build_daily_ohlcv,
+            'vix_regime': build_vix_regime,
+            'macro_flags': build_macro_flags,
+            'funding': build_funding_metrics,
+            'cot': build_cot_sentiment,
+            'regime_features': build_regime_features,
+            'hmm': build_hmm_regime,
+            'regime_label': build_regime_label,
+        }
+        for name in [s.strip() for s in args.stages.split(',') if s.strip()]:
+            fn = stage_map.get(name)
+            if fn is None:
+                print(f"❌ unknown stage '{name}' — valid: {sorted(stage_map)}")
+                sys.exit(2)
+            fn()
+    else:
+        build_all()
     if _n_stage_failures:
         print(f"\n⚠️  gold_builder: {_n_stage_failures} stage(s) failed: {_failed_stages}")
         sys.exit(_n_stage_failures)

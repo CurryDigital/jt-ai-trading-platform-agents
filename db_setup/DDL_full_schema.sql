@@ -2528,8 +2528,11 @@ CREATE TABLE gold.hk_ipo_performance (
     return_day10_pct numeric(10,4),
     return_day20_pct numeric(10,4),
     return_day30_pct numeric(10,4),
+    return_day40_pct numeric(10,4),
     return_day60_pct numeric(10,4),
     return_day90_pct numeric(10,4),
+    exit_day40_price numeric(10,4),
+    exit_day40_date date,
     current_price numeric(10,4),
     total_return_pct numeric(10,4),
     high_since_listing numeric(10,4),
@@ -6420,6 +6423,7 @@ CREATE TABLE gold.strategy_registry (
     signal_logic text,
     exit_logic text,
     signal_file_path text,
+    disable_paper_rebuild boolean DEFAULT false NOT NULL,
     created_at timestamp without time zone DEFAULT now(),
     updated_at timestamp without time zone DEFAULT now(),
     CONSTRAINT strategy_registry_execution_mode_check CHECK (((execution_mode)::text = ANY ((ARRAY['SIMULATION'::character varying, 'LIVE'::character varying])::text[]))),
@@ -7777,7 +7781,11 @@ CREATE VIEW gold.v_strategy_book_extended AS
             WHEN 'crude_seasonal'::text THEN 73999
             WHEN 'natgas_seasonal'::text THEN 75097
             ELSE NULL::integer
-        END AS min_nav_usd
+        END AS min_nav_usd,
+        CASE
+            WHEN (s.strategy_id)::text = ANY (ARRAY['cl_cot_trend','cot_contrarian_extreme','gc_cot_contrarian_inverse','vix_spike_fade_entry','rsi_oversold_long','pead_long','btc_momentum_long','crude_seasonal','natgas_seasonal','gold_seasonal']::text[]) THEN true
+            ELSE false
+        END AS regime_scope_declared
    FROM (((gold.strategy_research s
      LEFT JOIN latest_backtest b ON (((b.strategy_id)::text = (s.strategy_id)::text)))
      LEFT JOIN latest_trade t ON ((t.strategy_id = (s.strategy_id)::text)))

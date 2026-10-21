@@ -31,7 +31,8 @@ SELECT
     ticker,
     'tactical',
     'BUY',
-    score,
+    -- t_82a67ac5: continuous engine strength, not the raw inverse-vol weight
+    COALESCE(signal_strength, score),
     0,
     'ETF Multi-Asset Tactical Allocation: inverse-vol weight; weekly rebalance; 20% single-asset cap; 1.0 max leverage; halt on drawdown > 12%',
     now()

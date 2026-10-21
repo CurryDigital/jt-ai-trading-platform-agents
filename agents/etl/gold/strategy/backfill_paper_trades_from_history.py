@@ -8,6 +8,16 @@ subsequent HOLD date as exit.  Uses silver.unified_prices for entry/exit
 prices and recomputes shares from the entry-date score weight.  This is
 intended to repair a corrupt table where the same-day rebalancer opened and
 closed positions on the same date, producing $0 PnL trades.
+
+WARNING (t_cab98c37, 2026-08-17): this script DELETEs the strategy's entire
+ledger (open AND closed) and rebuilds it from entry-date scores.  When scores
+have been revised since entry (e.g. the batch10 v1 -> v3 20%-cap adoption),
+the rebuilt book silently contradicts the adopted design and destroys
+grandfathered positions and engine-booked re-open legs.  It is NOT idempotent
+repair — it is a full rewrite.  The canonical re-entry path is
+rebuild_paper_positions.py --strategy-id <id> (add --force-rebalance to
+bypass the cadence gate).  This script therefore refuses to run against a
+strategy that has ANY existing ledger rows unless --force is passed.
 """
 import sys, os, math
 from datetime import datetime, timezone
@@ -30,8 +40,24 @@ def latest_price(cur, ticker, on_or_before):
     return float(row[0]) if row else None
 
 
-def backfill_strategy(conn, strategy_id):
+def backfill_strategy(conn, strategy_id, force=False):
     cur = conn.cursor()
+
+    # Guard (t_cab98c37): never silently rewrite an existing book. See the
+    # module docstring for the full rationale.
+    cur.execute(
+        "SELECT count(*) FROM gold.paper_trades_synthetic WHERE strategy_id = %s",
+        (strategy_id,))
+    existing = cur.fetchone()[0]
+    if existing and not force:
+        cur.close()
+        raise SystemExit(
+            f"REFUSED: {strategy_id} already has {existing} ledger rows. "
+            "This script DELETEs and rewrites the whole book from entry-date "
+            "scores, which destroys grandfathered positions and engine-booked "
+            "legs when scores were revised after entry. Use "
+            "rebuild_paper_positions.py --strategy-id instead, or re-run with "
+            "--force if a full rewrite is truly intended.")
 
     cur.execute("""
         SELECT assigned_capital, universe_tickers
@@ -98,6 +124,10 @@ def backfill_strategy(conn, strategy_id):
         score_val = max(0, float(entry_score or 0))
         weight = score_val / total_buy_score if total_buy_score > 0 else 0
         notional = capital * weight
+        # Whole-share sizing (lot = 1): matches the unified lot convention
+        # (DECISION 2026-08-17, t_928a4e7d,
+        # docs/decisions/2026-08-17_lot_convention.md) — US equities/ETFs
+        # size in whole shares, no 100-share round-lot flooring.
         shares = math.floor(notional / entry_price) if entry_price > 0 else 0
         if shares <= 0:
             print(f"  ⚠️ {ticker}: computed 0 shares; skipping")
@@ -148,12 +178,14 @@ def backfill_strategy(conn, strategy_id):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print("Usage: python3 backfill_paper_trades_from_history.py <strategy_id>")
+    args = [a for a in sys.argv[1:] if a != '--force']
+    force = len(args) != len(sys.argv) - 1
+    if len(args) < 1:
+        print("Usage: python3 backfill_paper_trades_from_history.py <strategy_id> [--force]")
         sys.exit(1)
-    strategy_id = sys.argv[1]
+    strategy_id = args[0]
     conn = get_connection()
     try:
-        backfill_strategy(conn, strategy_id)
+        backfill_strategy(conn, strategy_id, force=force)
     finally:
         conn.close()

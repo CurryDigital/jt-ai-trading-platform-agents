@@ -42,7 +42,7 @@ SYNTHETIC_PREV_COLUMNS = {
 SQL_SCORES = """
 INSERT INTO gold.strategy_ticker_scores
   (strategy_id, ticker, score, signal_action, entry_score, exit_score,
-   criteria_met, position_status, deployed_at, updated_at)
+   criteria_met, position_status, deployed_at, updated_at, signal_strength)
 
 WITH criteria AS (
   SELECT
@@ -123,7 +123,14 @@ SELECT
   '{}'::jsonb,
   'NONE',
   NOW(),
-  NOW()
+  NOW(),
+  -- t_82a67ac5: continuous 0-100 strength = within-strategy midpoint
+  -- percentile of the criteria-% score (score itself stays the criteria-%,
+  -- which doubles as the rebalancer weight input and must not change).
+  ROUND((100.0 * (COUNT(*) OVER (PARTITION BY strategy_id)
+                  - RANK() OVER (PARTITION BY strategy_id ORDER BY COALESCE(score, 0) DESC)
+                  + 0.5)
+         / COUNT(*) OVER (PARTITION BY strategy_id))::numeric, 2)
 FROM signal_eval
 
 ON CONFLICT (strategy_id, ticker) DO UPDATE SET
@@ -131,6 +138,7 @@ ON CONFLICT (strategy_id, ticker) DO UPDATE SET
   signal_action  = EXCLUDED.signal_action,
   entry_score    = EXCLUDED.entry_score,
   exit_score     = EXCLUDED.exit_score,
+  signal_strength = EXCLUDED.signal_strength,
   updated_at     = NOW();
 """
 

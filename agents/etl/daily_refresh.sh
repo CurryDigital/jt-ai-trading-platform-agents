@@ -8,9 +8,13 @@
 #     a 100%-failing pipeline silently, writing "fresh" to gold_layer_state
 #     and reporting success. See README.md "honest state" for rationale.
 #   - Per-stage success/failure is tracked and written to .state.json by
-#     write_pipeline_state.py. sync_gold_layer_state.py reads that file
-#     and updates the DB. If the script aborts before the writer runs,
-#     gold_layer_state defaults to 'stale' instead of being left lying.
+#     run_stage.py. sync_gold_layer_state.py reads that file and updates the
+#     DB. If the script aborts before the writer runs, gold_layer_state defaults
+#     to 'stale' instead of being left lying.
+#
+# 2026-07-22: stage execution consolidated into run_stage.py driven by
+# pipeline_manifest.json. The IBKR EC2 ssh runner remains outside the manifest
+# because run_stage covers python/sql only.
 
 set -uo pipefail
 
@@ -43,11 +47,11 @@ fi
 set -a && source "${ENV_FILE}" && set +a
 echo "Loaded env from ${ENV_FILE}"
 
-# Use Hermes venv Python — but verify it actually exists.
-PYTHON="/home/ubuntu/.hermes/hermes-agent/venv/bin/python3"
+# Use ETL venv Python — but verify it actually exists.
+PYTHON="/home/ubuntu/.hermes/etl-venv/bin/python3"
 if [ ! -f "${PYTHON}" ]; then
-    echo "FATAL: Hermes venv Python not found at ${PYTHON}"
-    echo "Run bootstrap_hermes_venv.sh to provision the venv."
+    echo "FATAL: ETL venv Python not found at ${PYTHON}"
+    echo "Run /home/ubuntu/.hermes/etl-venv/bin provisioning to fix."
     exit 65  # EX_DATAERR
 fi
 
@@ -55,132 +59,21 @@ fi
 # would otherwise crash silently inside each stage. Better to fail here with
 # one clear message than 30 ModuleNotFoundError tracebacks scattered in logs.
 if ! "${PYTHON}" -c "import psycopg2, dotenv" 2>/dev/null; then
-    echo "FATAL: Hermes venv missing psycopg2 or python-dotenv."
+    echo "FATAL: ETL venv missing psycopg2 or python-dotenv."
     echo "  ${PYTHON} cannot import psycopg2 / dotenv."
-    echo "  Run: bash ${WORKSPACE}/../../bootstrap_hermes_venv.sh"
     exit 70  # EX_SOFTWARE
 fi
-echo "✅ Hermes venv check: psycopg2 + dotenv importable"
+echo "✅ ETL venv check: psycopg2 + dotenv importable"
 
 cd "${WORKSPACE}"
 
-# Failure / success tracking arrays
+# IBKR EC2 ssh runner is NOT covered by the python/sql manifest runner.
 FAILED_BRONZE=()
-OK_BRONZE=()
-FAILED_SILVER=()
-OK_SILVER=()
-FAILED_GOLD=()
-OK_GOLD=()
-FAILED_CONSUMPTION=()
-OK_CONSUMPTION=()
-
-# Per-script timeout (seconds)
-BRONZE_TIMEOUT=120
-SILVER_TIMEOUT=120
-GOLD_TIMEOUT=180
-CONSUMPTION_TIMEOUT=30
-
-run_bronze() {
-    local name="$1"
-    local script="$2"
-    shift 2
-    echo "→ ${name}..."
-    if timeout -k 10s ${BRONZE_TIMEOUT}s "${PYTHON}" "${script}" "$@"; then
-        echo "  ✅ ${name} complete"
-        OK_BRONZE+=("${name}")
-    else
-        local exit_code=$?
-        if [ $exit_code -eq 124 ]; then
-            echo "  ⏱️ ${name} TIMEOUT after ${BRONZE_TIMEOUT}s"
-        else
-            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
-        fi
-        FAILED_BRONZE+=("${name}")
-    fi
-}
-
-run_silver() {
-    local name="$1"
-    local script="$2"
-    echo "→ ${name}..."
-    if timeout -k 10s ${SILVER_TIMEOUT}s "${PYTHON}" "${script}"; then
-        echo "  ✅ ${name} complete"
-        OK_SILVER+=("${name}")
-    else
-        local exit_code=$?
-        if [ $exit_code -eq 124 ]; then
-            echo "  ⏱️ ${name} TIMEOUT after ${SILVER_TIMEOUT}s"
-        else
-            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
-        fi
-        FAILED_SILVER+=("${name}")
-    fi
-}
-
-run_gold() {
-    local name="$1"
-    local script="$2"
-    echo "→ ${name}..."
-    if timeout -k 10s ${GOLD_TIMEOUT}s "${PYTHON}" "${script}"; then
-        echo "  ✅ ${name} complete"
-        OK_GOLD+=("${name}")
-    else
-        local exit_code=$?
-        if [ $exit_code -eq 124 ]; then
-            echo "  ⏱️ ${name} TIMEOUT after ${GOLD_TIMEOUT}s"
-        else
-            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
-        fi
-        FAILED_GOLD+=("${name}")
-    fi
-}
-
-# 2026-07-01: per-script timeout overrides for consumption scripts that do
-# real cross-table analytics (not thin passthrough views) and legitimately
-# take longer than the default 30s. Confirmed via direct standalone timing
-# (not guessed): command_stocks_overview.py = 105.97s wall clock, exit 0,
-# 845 rows correctly upserted — a real result, not a hang. 30s was killing
-# a working query every day. Override budget reuses GOLD_TIMEOUT's 180s
-# ceiling (an existing precedent in this file) for ~70s headroom over the
-# observed baseline. Keyed by the exact relative path passed to
-# run_consumption below (consumption/<tab>/<script>.py).
-declare -A CONSUMPTION_TIMEOUT_OVERRIDES=(
-    ["consumption/command/command_stocks_overview.py"]=180
-)
-
-run_consumption() {
-    local name="$1"
-    local script="$2"
-    local timeout_s="${CONSUMPTION_TIMEOUT_OVERRIDES[$script]:-$CONSUMPTION_TIMEOUT}"
-    echo "→ ${name}... (budget ${timeout_s}s)"
-    if timeout -k 10s ${timeout_s}s "${PYTHON}" "${script}"; then
-        echo "  ✅ ${name} complete"
-        OK_CONSUMPTION+=("${name}")
-    else
-        local exit_code=$?
-        if [ $exit_code -eq 124 ]; then
-            echo "  ⏱️ ${name} TIMEOUT after ${timeout_s}s"
-        else
-            echo "  ⚠️ ${name} FAILED (exit $exit_code)"
-        fi
-        FAILED_CONSUMPTION+=("${name}")
-    fi
-}
 
 # ════════════════════════════════════════════
 echo ""
-echo "🔶 BRONZE — Raw Ingestion (by Source System)"
+echo "🔶 BRONZE — IBKR EC2 runner"
 echo "------------------------------------------"
-
-# Binance (crypto) — daily klines
-run_bronze "Binance crypto" "bronze/binance/ingest_binance.py" "1d"
-
-# FMP (equities/fundamentals)
-for f in bronze/fmp/*.py; do
-    if [ -f "$f" ]; then
-        run_bronze "FMP:$(basename "$f" .py)" "$f"
-    fi
-done
 
 # Interactive Brokers (positions/portfolio + live TWS sync)
 # Runs on EC2 gateway directly to avoid IP mismatch with TWS session
@@ -192,200 +85,30 @@ if [ $IBKR_EC2_EXIT -ne 0 ]; then
     echo "  ⚠️ IBKR EC2 runner failed (exit $IBKR_EC2_EXIT)"
 fi
 
-# Keep local IBKR scripts as fallback (disabled - EC2 runner handles all IBKR data)
-# for f in bronze/ibkr/*.py; do
-#     if [ -f "$f" ]; then
-#         run_bronze "IBKR:$(basename "$f" .py)" "$f"
-#     fi
-# done
-
-# HKEX (Hong Kong equities)
-for f in bronze/hkex/*.py; do
-    if [ -f "$f" ]; then
-        run_bronze "HKEX:$(basename "$f" .py)" "$f"
-    fi
-done
-
-# Yahoo Finance (equities only — NO CRYPTO)
-# 2026-07-01: skip any script tagged '# CADENCE: weekly' — those are
-# long-running jobs (10-15+ min) that don't fit the 120s daily bronze
-# timeout by design. They run via weekly_refresh.sh instead. Without this
-# check, ingest_yfinance_aux.py (earnings + institutional holdings, full
-# ticker universe) got swept into the daily loop and blew past every
-# reasonable time budget for a "daily" run.
-for f in bronze/yfinance/*.py; do
-    if [ -f "$f" ]; then
-        if grep -q '# CADENCE: weekly' "$f" 2>/dev/null; then
-            echo "→ skipping $(basename "$f" .py) (tagged weekly-cadence — see weekly_refresh.sh)"
-            continue
-        fi
-        run_bronze "YF:$(basename "$f" .py)" "$f"
-    fi
-done
-
-# FRED (macro indicators)
-for f in bronze/fred/*.py; do
-    if [ -f "$f" ]; then
-        run_bronze "FRED:$(basename "$f" .py)" "$f"
-    fi
-done
-
-# Manual uploads
-for f in bronze/manual/*.py; do
-    if [ -f "$f" ]; then
-        run_bronze "MANUAL:$(basename "$f" .py)" "$f"
-    fi
-done
-
-if [ ${#FAILED_BRONZE[@]} -gt 0 ]; then
-    echo "⚠️ Bronze failures: ${FAILED_BRONZE[*]}"
-fi
-
-echo "✅ Bronze complete (${#FAILED_BRONZE[@]} failures)"
-
 # ════════════════════════════════════════════
 echo ""
-echo "🔷 SILVER — Clean & Normalize"
+echo "🚀 Running all manifest stages via run_stage.py"
 echo "------------------------------------------"
 
-# Crypto normalization (from Binance)
-run_silver "Crypto normalize" "silver/crypto_normalize.py"
+"${PYTHON}" run_stage.py --cadence daily --state-out .state.json
+RUN_STAGE_EXIT=$?
 
-# All silver scripts
-for f in silver/*.py; do
-    if [ -f "$f" ]; then
-        run_silver "$(basename "$f" .py)" "$f"
-    fi
-done
-
-# IBKR silver promotion (from EC2 bronze data)
-run_silver "IBKR promote" "silver/promote_ibkr.py"
-run_silver "IBKR orders promote" "silver/promote_ibkr_orders.py"
-
-if [ ${#FAILED_SILVER[@]} -gt 0 ]; then
-    echo "⚠️ Silver failures: ${FAILED_SILVER[*]}"
-fi
-
-echo "✅ Silver complete (${#FAILED_SILVER[@]} failures)"
-
-# ════════════════════════════════════════════
-echo ""
-echo "🥇 GOLD — Curate by Asset Type"
-echo "------------------------------------------"
-
-# Crypto metrics
-run_gold "Crypto KPIs" "gold/crypto/crypto_metrics.py"
-run_gold "Crypto metrics build" "gold/crypto/build_crypto_kpis.py"
-
-# All asset types.
-# 2026-07-10: 'strategy' removed from this list — signal GENERATION moved to
-# agents/signals/pipeline/ (run by run_signal_cycle.sh AFTER this script).
-# gold/strategy/ now only holds build_attention_items.py, run explicitly
-# below. NOTE for the loop's semantics: gold/market/*.py scripts swept here
-# are ALSO re-run explicitly below (double-run; idempotent but wasteful) —
-# kept as-is pending an operator decision on intended ordering.
-for asset in equity fx commodity market portfolio ipo; do
-    if [ -d "gold/${asset}" ]; then
-        for f in gold/${asset}/*.py; do
-            if [ -f "$f" ]; then
-                run_gold "${asset}:$(basename "$f" .py)" "$f"
-            fi
-        done
-    fi
-done
-
-# Redesign data-related builders (explicit so pipeline ownership is obvious):
-#   market band, macro, execution/gateway, risk limits
-run_gold "Market overview" "consumption/market/market_overview.py"
-run_gold "Market breadth" "gold/market/build_market_breadth.py"
-run_gold "Market movers" "gold/market/build_market_movers.py"
-run_gold "Market sentiment" "gold/market/build_market_sentiment.py"
-run_gold "Macro KPIs" "gold/market/build_macro_kpis.py"
-run_gold "Macro sectors" "gold/market/build_macro_sectors.py"
-run_gold "Macro regime forecast" "gold/market/build_regime_forecast.py"
-run_gold "Economic calendar" "gold/market/build_economic_calendar.py"
-run_gold "Market news" "gold/market/build_market_news.py"
-run_gold "IB gateway state" "gold/market/build_ib_gateway_state.py"
-run_gold "Risk limits" "gold/market/build_risk_limits.py"
-run_gold "Attention items" "gold/strategy/build_attention_items.py"
-run_gold "Strategy annual backtest returns" "gold/strategy/refresh_annual_backtest_returns.py"
-run_gold "Account NAV daily" "gold/portfolio/build_account_nav_daily.py"
-run_gold "Manual positions fold-in" "gold/portfolio/build_manual_positions.py"
-
-# IBKR gold promotion (from silver data)
-run_gold "IBKR promote" "gold/promote_ibkr.py"
-run_gold "IBKR orders promote" "gold/promote_ibkr_orders.py"
-
-# 2026-07-10: signal generation removed from this script entirely — it now
-# lives in agents/signals/pipeline/ and runs via run_signal_cycle.sh, which
-# gates on gold_layer_state so signals are never computed from a broken
-# gold layer. What moved and why the old lines were broken anyway:
-#   gold/strategy/s9_macd_daily.py            → agents/signals/pipeline/
-#   gold/strategy/ingest_small_cap_credit_spread.py — file no longer exists
-#       (consolidated into agents/signals/pipeline/ingest_paper_signal.py);
-#       this line had been failing on every run since the consolidation.
-#   build_etf_*_paper_signal.sql — were invoked as ${PYTHON} <file>.sql,
-#       i.e. Python parsing SQL: SyntaxError on EVERY run since they were
-#       added. Now executed properly (via db.py) in run_signal_cycle.sh.
-#   paper_run_etf_*.py                        → agents/signals/pipeline/
-
-if [ ${#FAILED_GOLD[@]} -gt 0 ]; then
-    echo "⚠️ Gold failures: ${FAILED_GOLD[*]}"
-fi
-
-echo "✅ Gold complete (${#FAILED_GOLD[@]} failures)"
-
-# ════════════════════════════════════════════
-echo ""
-echo "📊 CONSUMPTION — Serve by Frontend Tab"
-echo "------------------------------------------"
-for tab in command lab performance portfolio market; do
-    if [ -d "consumption/${tab}" ]; then
-        for f in consumption/${tab}/*.py; do
-            if [ -f "$f" ]; then
-                run_consumption "${tab}:$(basename "$f" .py)" "$f"
-            fi
-        done
-    fi
-done
-
-if [ ${#FAILED_CONSUMPTION[@]} -gt 0 ]; then
-    echo "⚠️ Consumption failures: ${FAILED_CONSUMPTION[*]}"
-fi
-
-echo "✅ Consumption complete (${#FAILED_CONSUMPTION[@]} failures)"
+echo "✅ Manifest stages complete (run_stage exit ${RUN_STAGE_EXIT})"
 
 # ════════════════════════════════════════════
 echo ""
 echo "=========================================="
 
-# Write the per-stage truth into .state.json BEFORE sync_gold_layer_state.py runs.
-# This is the only place that decides what state to claim — failing fast
-# above means we never lie about freshness.
-join_csv() { local IFS=','; echo "$*"; }
-
-"${PYTHON}" "${WORKSPACE}/write_pipeline_state.py" \
-    --output "${WORKSPACE}/.state.json" \
-    --bronze-ok      "$(join_csv "${OK_BRONZE[@]:-}")" \
-    --bronze-failed  "$(join_csv "${FAILED_BRONZE[@]:-}")" \
-    --silver-ok      "$(join_csv "${OK_SILVER[@]:-}")" \
-    --silver-failed  "$(join_csv "${FAILED_SILVER[@]:-}")" \
-    --gold-ok        "$(join_csv "${OK_GOLD[@]:-}")" \
-    --gold-failed    "$(join_csv "${FAILED_GOLD[@]:-}")" \
-    --consumption-ok      "$(join_csv "${OK_CONSUMPTION[@]:-}")" \
-    --consumption-failed  "$(join_csv "${FAILED_CONSUMPTION[@]:-}")" \
-    && echo "✅ .state.json written" \
-    || echo "⚠️ write_pipeline_state.py FAILED — sync will default to 'stale'"
-
+# sync_gold_layer_state.py reads the .state.json produced by run_stage.py.
 "${PYTHON}" "${WORKSPACE}/sync_gold_layer_state.py" \
     && echo "✅ gold_layer_state synced to DB" \
     || echo "⚠️ sync_gold_layer_state FAILED"
 
-TOTAL_FAILS=$(( ${#FAILED_BRONZE[@]} + ${#FAILED_SILVER[@]} + ${#FAILED_GOLD[@]} + ${#FAILED_CONSUMPTION[@]} ))
+TOTAL_FAILS=$(( ${RUN_STAGE_EXIT:-0} + ${IBKR_EC2_EXIT:-0} ))
 echo "DAILY REFRESH COMPLETED: $(date)"
-echo "Total failures: ${TOTAL_FAILS} (Bronze:${#FAILED_BRONZE[@]} Silver:${#FAILED_SILVER[@]} Gold:${#FAILED_GOLD[@]} Consumption:${#FAILED_CONSUMPTION[@]})"
+echo "Total failures: ${TOTAL_FAILS} (run_stage exit ${RUN_STAGE_EXIT}, IBKR EC2 exit ${IBKR_EC2_EXIT})"
 echo "Log: ${LOG_FILE}"
 echo "=========================================="
 
-# Exit non-zero if any stage failed
+# Exit non-zero if the manifest runner or the IBKR EC2 runner failed
 exit ${TOTAL_FAILS}

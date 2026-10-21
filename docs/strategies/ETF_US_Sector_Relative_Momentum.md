@@ -35,26 +35,31 @@ used as calendar deltas, distorting every window):
 
 **Ranking**: sort ETFs by composite momentum (tie-break: most recent 1m return).
 
-**Entry / weights**:
-- top `TOP_N = 3` → `signal_action = BUY`, score `30.0` each
+**Entry / weights** (tuned 2026-09-18, kanban t_3741eba6, backtest run_number=4):
+- top `TOP_N = 4` → `signal_action = BUY`, score `22.5` each
 - the rest → `HOLD`, score `0`
 - a synthetic `CASH` row gets score `10.0` (residual 10% cash)
 Scores are emitted as target-weight percentages summing to 100, written to
-`gold.strategy_ticker_scores`. The rebalancer
+`gold.strategy_ticker_scores`. The scheduled writer is
+`agents/signals/pipeline/build_rotation_signals.py` (config `top_n=4`,
+`cash_residual=0.10` → fractional weights 0.225/0.10); this engine stays in
+sync with it. The rebalancer
 (`rebuild_paper_positions.py`) turns weights × assigned_capital ÷ price into
 share targets and opens/closes paper positions accordingly.
 
 ## Exit logic
-Position-style rebalance: a held ETF is closed when it drops out of the top-3
+Position-style rebalance: a held ETF is closed when it drops out of the top-4
 BUY set on a later run (handled by `rebuild_paper_positions.py`, which closes
 positions no longer in the target set at the current price).
 
 ## Backtest summary (OOS)
-From `gold.strategy_backtest_runs` (latest). As of 2026-07 the registry showed
-Sharpe ≈ 1.43 / win rate ≈ 69% / max DD ≈ -7.7% over 34 OOS trades — but note
-this strategy's ETF backtest rows were among those touched by the quarantined
-`backfill_etf_win_rate_oos.py` reverse-sync; treat OOS win-rate as provisional
-until qr_research re-delivers (OPERATOR_NOTES flag 6).
+From `gold.strategy_backtest_runs` run_number=4 (tuned, KEEP-TUNED 2026-09-18
+review): Sharpe 1.611 / return 38.2% / max DD -6.8% over 38 OOS trades,
+holdout 2026-07-01..2026-09-17 +1.15% Sharpe 0.45 PASS. Earlier runs showed
+Sharpe ≈ 1.43 / win rate ≈ 69% — but note this strategy's ETF backtest rows
+were among those touched by the quarantined `backfill_etf_win_rate_oos.py`
+reverse-sync; treat pre-run-4 OOS win-rate as provisional (OPERATOR_NOTES
+flag 6).
 
 ## Data dependencies
 `silver.unified_prices` ← `bronze.yf_prices`; `gold.strategy_registry`

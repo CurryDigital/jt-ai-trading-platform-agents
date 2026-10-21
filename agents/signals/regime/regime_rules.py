@@ -40,7 +40,12 @@ import pandas as pd
 def _load_strategy_map():
     """Compute STRATEGY_MAP from the registry. Falls back to the legacy
     hardcoded map if the loader is unavailable (e.g. registry.json missing
-    during a partial deploy) so this module never fails to import."""
+    during a partial deploy) so this module never fails to import.
+
+    Returns (map, source) where source is 'registry' | 'legacy_fallback'.
+    2026-10-07 (t_22ef1dff): source exposed as module-level STRATEGY_MAP_SOURCE
+    so run_signals.py can record it in gold.regime_gate_decision_log.map_source
+    (spec: deriv_equity_enrichment_v1/REGIME_GATE_SNAPSHOT_SPEC.md)."""
     legacy = {
         'TREND'   : [1, 2, 6, 11, 15, 16, 18],
         'MEAN_REV': [3, 5, 8, 10, 13, 14, 19, 20],
@@ -51,7 +56,7 @@ def _load_strategy_map():
     try:
         # _SIGNALS_ROOT was already added to sys.path at module top.
         from strategies.registry_loader import build_strategy_map
-        return build_strategy_map()
+        return build_strategy_map(), 'registry'
     except Exception as e:
         import sys
         print(
@@ -59,10 +64,10 @@ def _load_strategy_map():
             f"(registry_loader failed: {e})",
             file=sys.stderr,
         )
-        return legacy
+        return legacy, 'legacy_fallback'
 
 
-STRATEGY_MAP = _load_strategy_map()
+STRATEGY_MAP, STRATEGY_MAP_SOURCE = _load_strategy_map()
 
 VALID_REGIMES = {'TREND', 'MEAN_REV', 'CARRY', 'EVENT', 'FLAT'}
 
