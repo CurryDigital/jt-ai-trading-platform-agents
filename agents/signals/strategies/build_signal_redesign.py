@@ -33,6 +33,19 @@ worse than an empty panel. Also removed INSERT_REAL_EVALUATIONS_SQL, which
 was dead code and invalid SQL (it called the Python helper
 map_strategy_to_family() inside the query text).
 
+2026-08-05 (t_82a67ac5): `potential` now reads the engine-emitted
+`signal_strength` (continuous 0-100 cross-sectional composite, midpoint
+percentile of the strategy's rank metric) instead of `sts.score`, which is
+the portfolio target WEIGHT in mixed units per writer (0.33 vs 50.00 for
+the same 0.5 weight; 0.00 for every SELL row). Legacy clamp of `score` is
+kept only as a fallback for rows written by engines that do not emit
+signal_strength yet.
+
+2026-08-05 (t_071207e4): `note` no longer surfaces sts.criteria_met — that
+column carries engine-config JSON (engine/config_rank/strength_method/...),
+not a human reason. Explicit reason keys (reason/rationale/thesis/summary)
+are extracted if a future engine emits them; otherwise note is NULL.
+
 Pipeline: signal generation cycle (run_signal_cycle.sh, AFTER run_signals.py).
 """
 
@@ -55,6 +68,32 @@ from freshness import mark_source_refreshed
 # the SELECT can't drift apart, which is how the previous version ended up
 # with two 12-branch copies of the same CASE).
 STRATEGY_KEYWORD_TO_FAMILY = [
+    # batch10 (t_ab5f0b78, 2026-08-05): explicit-id branches FIRST so the
+    # manifest signal_family wins over the generic keyword rules below
+    # ('sue'->Seasonal SUE, 'etf'->tactical, and hk_stk_52wh had no match at
+    # all, which silently dropped it from the feed).
+    ('us_stk_sue_mom', 'earnings'),
+    ('hk_stk_52wh_mom', 'momentum'),
+    ('etf_tsmom', 'trend'),
+    ('etf_country_rot', 'momentum'),
+    # batch11 (t_3f3d3109, 2026-08-05): explicit-id branches FIRST, same
+    # rationale as batch10 — manifest signal_family wins over generic keyword
+    # rules ('etf'->tactical would misfile etf_tech_mom (momentum), and the
+    # cn_/sg_/us_stk_lowbeta ids match no generic keyword at all).
+    ('cn_stk_lowvol', 'tactical'),
+    ('sg_stk_52wh_mom', 'momentum'),
+    ('us_stk_lowbeta', 'tactical'),
+    ('etf_vix_scaled', 'tactical'),
+    ('etf_tech_mom', 'momentum'),
+    ('etf_def_sector_rot', 'tactical'),
+    # batch12 (t_56e35a73, 2026-08-05): explicit-id branch, same rationale —
+    # manifest signal_family='trend' must win over the generic 'etf'->tactical
+    # rule for the commodity crisis-alpha sleeve.
+    ('etf_comm_trend', 'trend'),
+    # hk_ipo_postlisting_drift_p1 (kanban 5711f0bb, 2026-08-31): manifest
+    # signal_family='momentum' must win over the generic 'drift'->'trend'
+    # keyword that the strategy_id would otherwise match.
+    ('hk_ipo_postlisting', 'momentum'),
     ('momentum',    'momentum'),
     ('macd',        'momentum'),
     ('mean_rev',    'mean_rev'),
@@ -113,9 +152,26 @@ FROM (
         COALESCE(ar.name, sts.ticker) AS name,
         {_family_case_sql().replace(chr(10), chr(10) + '        ')} AS family_key,
         CASE WHEN sts.signal_action = 'BUY' THEN 'BUY' ELSE 'SELL' END AS direction,
-        ROUND(LEAST(100.0, GREATEST(0.0, sts.score))::numeric, 2) AS potential,
+        -- t_82a67ac5: engine-emitted continuous 0-100 composite strength;
+        -- legacy clamp of the raw weight (sts.score) only as fallback.
+        ROUND(LEAST(100.0, GREATEST(0.0,
+            COALESCE(sts.signal_strength, sts.score)))::numeric, 2) AS potential,
         ROUND(COALESCE(k.change_1d, 0)::numeric, 2) AS change_pct,
-        LEFT(COALESCE(sts.criteria_met::text, 'Scored by ' || sts.strategy_id), 200) AS note
+        -- t_071207e4: criteria_met holds engine-config JSON (engine /
+        -- config_rank / strength_method / batch_id / ...), not a human
+        -- reason — never surface it as `note`. Extract an explicit reason
+        -- key if a future engine provides one; otherwise NULL so the UI
+        -- shows nothing instead of config junk.
+        CASE
+            WHEN sts.criteria_met IS NOT NULL
+                 AND jsonb_typeof(sts.criteria_met) = 'object'
+            THEN LEFT(COALESCE(
+                sts.criteria_met->>'reason',
+                sts.criteria_met->>'rationale',
+                sts.criteria_met->>'thesis',
+                sts.criteria_met->>'summary'
+            ), 200)
+        END AS note
     FROM gold.strategy_ticker_scores sts
     JOIN gold.strategy_registry sr ON sr.strategy_id = sts.strategy_id
     JOIN gold.asset_registry ar ON ar.ticker = sts.ticker

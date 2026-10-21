@@ -64,10 +64,49 @@ def now_hkt() -> str:
 def load_signal_file(path: str) -> tuple:
     with open(path, "r") as f:
         data = json.load(f)
-    signals = data.get("signals") or {}
+    signals = data.get("signals")
+    if signals is None and "selected" in data:
+        # 2026-07-28 schema change: qr_research now emits per-strategy files as
+        # {strategy_id, selected, cash_filter, ...} with no 'signals' key.
+        # Normalise into the per-strategy signals-list shape handled below.
+        sel = data.get("selected") or []
+        if not sel:
+            if data.get("cash_filter"):
+                # Flat/all-cash signal. Matches the {'CASH': 1.0} convention
+                # used by the multi-strategy files (e.g. US_STK_GOLD_HDG_05).
+                signals = [{"ticker": "CASH", "weight": 1.0, "action": "BUY"}]
+            else:
+                raise SystemExit(
+                    f"Empty 'selected' and cash_filter not set in {path}")
+        elif all(isinstance(s, dict) and s.get("ticker")
+                 and s.get("weight") is not None for s in sel):
+            signals = sel
+        else:
+            raise SystemExit(
+                f"'selected' entries in {path} lack ticker/weight — "
+                "refusing to invent weights")
     if not signals:
         raise SystemExit(f"No 'signals' object found in {path}")
-    return data.get("generated_at", "unknown"), signals
+    metrics_path = path.replace("_live_signals.json", "_signal_metrics.json")
+    metrics = {}
+    if os.path.exists(metrics_path):
+        try:
+            with open(metrics_path, "r") as f:
+                metrics = json.load(f)
+        except Exception as e:
+            print(f"{now_hkt()} ⚠️  could not load metrics file {metrics_path}: {e}", file=sys.stderr)
+    return data.get("generated_at", "unknown"), signals, data, metrics
+
+
+def resolve_strategy_info_by_id(conn, strategy_id: str):
+    """Look up (name, asset_class) by strategy_id. Returns (None, None) if absent."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name, asset_class FROM gold.strategy_registry WHERE strategy_id = %s",
+        (strategy_id,),
+    )
+    row = cur.fetchone()
+    return row if row else (None, None)
 
 
 def resolve_strategy_id(conn, strategy_name: str):
@@ -84,35 +123,52 @@ def resolve_strategy_id(conn, strategy_name: str):
 def ensure_strategy_registry(conn, strategy_id, strategy_name, asset_class,
                              signal_file_path, tickers):
     cur = conn.cursor()
+    # Test hook: sandbox copies point REGISTRY_TABLE_OVERRIDE at a scratch
+    # table (e.g. 'sandbox_p1.strategy_registry'). Production never sets it.
+    reg = os.environ.get("REGISTRY_TABLE_OVERRIDE", "gold.strategy_registry")
+    # If caller didn't override asset_class, preserve the registry's value.
+    if asset_class is None:
+        cur.execute(
+            f"SELECT asset_class FROM {reg} WHERE strategy_id = %s",
+            (strategy_id,),
+        )
+        row = cur.fetchone()
+        asset_class = row[0] if row and row[0] else "US Stock"
+    # 2026-10-18 (P1): NEVER write universe_tickers from an ingest. `tickers`
+    # here is the signal file's PICK LIST, not the universe — overwriting the
+    # pinned universe with it shrank all five ingested sleeves (512→20 etc.)
+    # when qr_research's integration test ingested a short pick list. Universe
+    # membership changes go through an explicit registry update only. The
+    # INSERT branch (brand-new strategy) still seeds it once.
     cur.execute(
-        """
-        UPDATE gold.strategy_registry
-        SET asset_class      = %s,
+        f"""
+        UPDATE {reg}
+        SET asset_class      = COALESCE(%s, asset_class),
             execution_mode   = 'PAPER',
             status           = 'paper',
-            universe_tickers = %s,
             signal_file_path = %s,
             updated_at       = NOW(),
             last_signal_at   = NOW()
         WHERE strategy_id = %s;
         """,
-        (asset_class, tickers, signal_file_path, strategy_id),
+        (asset_class, signal_file_path, strategy_id),
     )
     if cur.rowcount == 0:
         cur.execute(
-            """
-            INSERT INTO gold.strategy_registry
+            f"""
+            INSERT INTO {reg}
               (strategy_id, name, asset_class, execution_mode, status,
                universe_tickers, signal_file_path, updated_at, last_signal_at)
             VALUES (%s, %s, %s, 'PAPER', 'paper', %s, %s, NOW(), NOW());
             """,
-            (strategy_id, strategy_name, asset_class, tickers, signal_file_path),
+            (strategy_id, strategy_name, asset_class or "US Stock", tickers, signal_file_path),
         )
     conn.commit()
-    print(f"{now_hkt()} ✅ gold.strategy_registry updated for {strategy_id}")
+    print(f"{now_hkt()} ✅ {reg} updated for {strategy_id} (universe_tickers untouched)")
 
 
-def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights):
+def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, metrics=None):
+    metrics = metrics or {}
     cur = conn.cursor()
     # Stamp provenance (migration 009) when the column exists, so these
     # file-ingested rows are distinguishable from computed ones. Guarded so
@@ -124,25 +180,80 @@ def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights):
     except Exception:
         has_src = False
 
-    def crit(weight):
-        return json.dumps({
+    # 2026-10-17: persist the signal file's own compute time as computed_at
+    # (freshness checks read COALESCE(computed_at, updated_at)). generated_at
+    # is an ISO string like "2026-08-05T00:00:00Z"; unparseable -> NULL.
+    computed_at = None
+    try:
+        if generated_at and generated_at != "unknown":
+            computed_at = datetime.fromisoformat(
+                str(generated_at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        computed_at = None
+
+    def crit(weight, ticker):
+        base = {
             "weight": weight,
             "source_signal_file": signal_file,
             "generated_at": generated_at,
             "ingested_at": datetime.now(HKT).isoformat(),
-        })
+        }
+        meta = metrics.get(ticker)
+        if meta and isinstance(meta, dict):
+            base.update({
+                "risk_adj_momentum_12m": meta.get("risk_adj_momentum"),
+                "total_return_12m": meta.get("total_return_12m"),
+                "ann_vol_12m": meta.get("ann_vol_12m"),
+                "selected": meta.get("selected"),
+            })
+        return json.dumps(base)
+
+    def score_row(ticker, weight):
+        entry_score = round(float(weight) * 100, 4)
+        # Consistent with build_strategy_scores.py semantics: score = entry_score,
+        # action is BUY only when the ticker has positive target weight.
+        score = entry_score if entry_score > 0 else 0.0
+        action = "BUY" if entry_score > 0 else "HOLD"
+        return score, action, entry_score
+
+    # t_82a67ac5: continuous 0-100 signal strength = midpoint percentile of the
+    # file's target weights across its tickers. The signal files carry weights,
+    # not rank metrics, so weight rank is the honest continuous proxy available
+    # at ingest time. score/entry_score keep their weight*100 semantics
+    # (rebalancer contract) — strength is additive.
+    def weight_strengths(w):
+        items = sorted(((t, float(x)) for t, x in w.items()), key=lambda kv: (-kv[1], kv[0]))
+        n = len(items)
+        out = {}
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and items[j + 1][1] == items[i][1]:
+                j += 1
+            avg_rank = (i + j) / 2.0 + 1.0
+            s = round(100.0 * (n - avg_rank + 0.5) / n, 2)
+            for k in range(i, j + 1):
+                out[items[k][0]] = s
+            i = j + 1
+        return out
+
+    strengths = weight_strengths(weights)
 
     if has_src:
-        rows = [
-            (strategy_id, ticker, 100.0, "BUY", weight * 100, 0.0, crit(weight),
-             "PAPER", datetime.now(), datetime.now(), SIGNAL_INGESTED)
-            for ticker, weight in weights.items()
-        ]
+        rows = []
+        for ticker, weight in weights.items():
+            score, action, entry_score = score_row(ticker, weight)
+            rows.append(
+                (strategy_id, ticker, score, action, entry_score, 0.0, crit(weight, ticker),
+                 "PAPER", datetime.now(), datetime.now(), SIGNAL_INGESTED,
+                 strengths.get(ticker), computed_at)
+            )
         sql = """
         INSERT INTO gold.strategy_ticker_scores
           (strategy_id, ticker, score, signal_action, entry_score, exit_score,
-           criteria_met, position_status, deployed_at, updated_at, signal_source)
-        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+           criteria_met, position_status, deployed_at, updated_at, signal_source,
+           signal_strength, computed_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (strategy_id, ticker) DO UPDATE SET
           score           = EXCLUDED.score,
           signal_action   = EXCLUDED.signal_action,
@@ -151,19 +262,24 @@ def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights):
           criteria_met    = EXCLUDED.criteria_met,
           position_status = EXCLUDED.position_status,
           updated_at      = EXCLUDED.updated_at,
-          signal_source   = EXCLUDED.signal_source;
+          signal_source   = EXCLUDED.signal_source,
+          signal_strength = EXCLUDED.signal_strength,
+          computed_at     = EXCLUDED.computed_at;
         """
     else:
-        rows = [
-            (strategy_id, ticker, 100.0, "BUY", weight * 100, 0.0, crit(weight),
-             "PAPER", datetime.now(), datetime.now())
-            for ticker, weight in weights.items()
-        ]
+        rows = []
+        for ticker, weight in weights.items():
+            score, action, entry_score = score_row(ticker, weight)
+            rows.append(
+                (strategy_id, ticker, score, action, entry_score, 0.0, crit(weight, ticker),
+                 "PAPER", datetime.now(), datetime.now(), strengths.get(ticker), computed_at)
+            )
         sql = """
         INSERT INTO gold.strategy_ticker_scores
           (strategy_id, ticker, score, signal_action, entry_score, exit_score,
-           criteria_met, position_status, deployed_at, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+           criteria_met, position_status, deployed_at, updated_at, signal_strength,
+           computed_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
         ON CONFLICT (strategy_id, ticker) DO UPDATE SET
           score           = EXCLUDED.score,
           signal_action   = EXCLUDED.signal_action,
@@ -171,6 +287,8 @@ def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights):
           exit_score      = EXCLUDED.exit_score,
           criteria_met    = EXCLUDED.criteria_met,
           position_status = EXCLUDED.position_status,
+          signal_strength = EXCLUDED.signal_strength,
+          computed_at     = EXCLUDED.computed_at,
           updated_at      = EXCLUDED.updated_at;
         """
     cur.executemany(sql, rows)
@@ -186,14 +304,14 @@ def insert_signal_logs(conn, strategy_id, signal_file, weights):
         "DELETE FROM consumption.signal_logs WHERE strategy_id = %s AND signal_date = %s;",
         (strategy_id, date.today()),
     )
-    rows = [
-        (
-            strategy_id, date.today(), 1, ticker, "BUY",
-            f"weight={weight}; source={signal_file}",
-            weight * 100,
+    rows = []
+    for ticker, weight in weights.items():
+        confidence = round(float(weight) * 100, 4)
+        signal_type = "BUY" if confidence > 0 else "HOLD"
+        rows.append(
+            (strategy_id, date.today(), 1, ticker, signal_type,
+             f"weight={weight}; source={signal_file}", confidence)
         )
-        for ticker, weight in weights.items()
-    ]
     cur.executemany(
         """
         INSERT INTO consumption.signal_logs
@@ -234,13 +352,39 @@ def record_agent_event(conn, strategy_id, strategy_name, signal_file,
     print(f"{now_hkt()} ✅ gold.agent_events recorded: {cur.rowcount} row(s)")
 
 
+def is_strategy_ingest_enabled(conn, strategy_id):
+    """Return True only if the registry row expects ingested signals and is active."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT status, signal_mechanism, disable_paper_rebuild "
+        "FROM gold.strategy_registry WHERE strategy_id = %s",
+        (strategy_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    if not row:
+        return False, "not in gold.strategy_registry"
+    status, mechanism, disabled = row
+    if status != "paper":
+        return False, f"registry status is {status}"
+    if mechanism != "ingested":
+        return False, f"signal_mechanism is {mechanism}"
+    if disabled:
+        return False, "disable_paper_rebuild is TRUE"
+    return True, None
+
+
 def ingest_one(conn, strategy_id, strategy_name, asset_class,
-               signal_file, generated_at, weights) -> None:
+               signal_file, generated_at, weights, metrics=None) -> None:
+    enabled, reason = is_strategy_ingest_enabled(conn, strategy_id)
+    if not enabled:
+        print(f"{now_hkt()} ⏸️  Skipping {strategy_id}: {reason}")
+        return
     tickers = list(weights.keys())
     print(f"{now_hkt()} Ingesting {strategy_name} ({strategy_id}): {weights}")
     ensure_strategy_registry(conn, strategy_id, strategy_name, asset_class,
                              signal_file, tickers)
-    upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights)
+    upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, metrics)
     insert_signal_logs(conn, strategy_id, signal_file, weights)
     record_agent_event(conn, strategy_id, strategy_name, signal_file,
                        generated_at, weights)
@@ -248,9 +392,45 @@ def ingest_one(conn, strategy_id, strategy_name, asset_class,
 
 def _ingest_all_from_file(conn, signal_file, asset_class):
     """Ingest every strategy in one signal file. Returns (n_ok, skipped)."""
-    generated_at, signals = load_signal_file(signal_file)
+    generated_at, signals, data, metrics = load_signal_file(signal_file)
     print(f"{now_hkt()} Loaded signal file: {signal_file} (generated {generated_at})")
     n_ok, skipped = 0, []
+    basename = os.path.basename(signal_file)
+
+    # Per-strategy file: signals is a list of {"ticker", "action", "weight"} objects.
+    if isinstance(signals, list):
+        sid = data.get("strategy_id")
+        if not sid:
+            skipped.append((basename, "signals is list but no top-level strategy_id"))
+            return n_ok, skipped
+        name, reg_asset_class = resolve_strategy_info_by_id(conn, sid)
+        if name is None:
+            skipped.append((basename, f"strategy_id {sid} not in gold.strategy_registry"))
+            return n_ok, skipped
+        weights = {}
+        for entry in signals:
+            if not isinstance(entry, dict):
+                continue
+            ticker = entry.get("ticker")
+            weight = entry.get("weight")
+            action = entry.get("action", "BUY")
+            if ticker is None or weight is None:
+                continue
+            # Exclude explicit exits and zero-weight HOLD placeholders.
+            if action in ("SELL", "EXIT"):
+                continue
+            if action == "HOLD" and weight == 0:
+                continue
+            weights[ticker] = float(weight)
+        if not weights:
+            skipped.append((basename, "empty weights"))
+            return n_ok, skipped
+        ingest_one(conn, sid, name, reg_asset_class or asset_class,
+                   signal_file, generated_at, weights, metrics)
+        n_ok += 1
+        return n_ok, skipped
+
+    # Multi-strategy file: signals is a dict keyed by strategy name.
     for name, weights in signals.items():
         if not weights:
             skipped.append((name, "empty weights"))
@@ -259,7 +439,7 @@ def _ingest_all_from_file(conn, signal_file, asset_class):
         if sid is None:
             skipped.append((name, "not in gold.strategy_registry"))
             continue
-        ingest_one(conn, sid, name, asset_class, signal_file, generated_at, weights)
+        ingest_one(conn, sid, name, asset_class, signal_file, generated_at, weights, metrics)
         n_ok += 1
     return n_ok, skipped
 
@@ -272,15 +452,15 @@ def main() -> int:
                      help="Directory of signal files — ingest ALL matching --signal-glob. "
                           "This is the consistent recurring path: one call replaces "
                           "the per-strategy/per-batch ingest scripts.")
-    p.add_argument("--signal-glob", default="*live_signals*.json",
-                   help="Filename pattern for --signal-dir (default: '*live_signals*.json'). "
-                        "Keeps backtest/manifest JSONs out of the ingest.")
+    p.add_argument("--signal-glob", default="*_live_signals.json",
+                   help="Filename pattern for --signal-dir (default: '*_live_signals.json'). "
+                        "Only matches per-strategy files ending in _live_signals.json.")
     p.add_argument("--strategy-id",
                    help="gold.strategy_registry.strategy_id (single-strategy mode)")
     p.add_argument("--strategy-name",
                    help="Key under the file's 'signals' object (single-strategy mode)")
-    p.add_argument("--asset-class", default="US Stock",
-                   help="Registry asset_class value (default: 'US Stock')")
+    p.add_argument("--asset-class", default=None,
+                   help="Override registry asset_class value (default: preserve registry value)")
     p.add_argument("--all", action="store_true",
                    help="Ingest every strategy in the file; ids resolved from "
                         "gold.strategy_registry by name, unknown names skipped")
@@ -295,8 +475,14 @@ def main() -> int:
             # match a signal-file naming pattern rather than every *.json.
             files = sorted(glob.glob(os.path.join(args.signal_dir, args.signal_glob)))
             if not files:
-                print(f"{now_hkt()} ⚠️  no files matching {args.signal_glob!r} in {args.signal_dir}")
-                return 1
+                # No deployed signal files today is a NO-OP, not a failure:
+                # 'ingested' strategies receive files event-driven (monthly /
+                # WRITE_SIGNAL handoff), so most days the dir legitimately has
+                # nothing. Hard-failing here turned the whole signal cycle RED
+                # every no-signal day (2026-08-05 cron). Real file/parse errors
+                # still hard-fail via the `skipped` list below.
+                print(f"{now_hkt()} ℹ️  no files matching {args.signal_glob!r} in {args.signal_dir} — nothing to ingest (no-op)")
+                return 0
             print(f"{now_hkt()} Scanning {len(files)} signal file(s) in {args.signal_dir}")
             for f in files:
                 # BaseException catch: load_signal_file raises SystemExit on a
@@ -313,12 +499,12 @@ def main() -> int:
         else:
             if not (args.strategy_id and args.strategy_name):
                 p.error("single-file mode needs --all, or both --strategy-id and --strategy-name")
-            generated_at, signals = load_signal_file(args.signal_file)
+            generated_at, signals, _, metrics = load_signal_file(args.signal_file)
             weights = signals.get(args.strategy_name) or {}
             if not weights:
                 raise SystemExit(f"No {args.strategy_name!r} signals in {args.signal_file}")
             ingest_one(conn, args.strategy_id, args.strategy_name,
-                       args.asset_class, args.signal_file, generated_at, weights)
+                       args.asset_class, args.signal_file, generated_at, weights, metrics)
             total_ok = 1
     finally:
         conn.close()

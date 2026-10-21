@@ -126,3 +126,44 @@ def check_deps() -> bool:
     except ModuleNotFoundError as e:
         print(str(e), file=sys.stderr)
         return False
+
+
+def require_table(conn, schema: str, table: str):
+    """
+    Fail fast if `schema.table` is not an ordinary table.
+
+    One-off backfills have historically dropped this table and replaced it
+    with a grouped view, which then breaks INSERT ... ON CONFLICT in the
+    daily ETL. Calling this guard before writing surfaces the misconfiguration
+    immediately with an actionable error instead of a raw Postgres
+    ObjectNotInPrerequisiteState traceback.
+    """
+    psycopg2, _ = _load_env_and_imports()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT c.relkind, pg_get_viewdef(c.oid, true)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relname = %s
+            """,
+            (schema, table),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"Target {schema}.{table} does not exist. "
+                "Apply the latest schema migration before running the ETL."
+            )
+        kind, viewdef = row
+        if kind != 'r':
+            detail = f"\nCurrent definition:\n{viewdef}" if viewdef else ""
+            raise RuntimeError(
+                f"Target {schema}.{table} is not a table (relkind={kind}). "
+                f"A one-off script may have replaced it with a view. "
+                f"Apply db_setup/migrations/013_restore_performance_monthly_returns_table.sql "
+                f"to restore the table, then re-run the pipeline.{detail}"
+            )
+    finally:
+        cur.close()

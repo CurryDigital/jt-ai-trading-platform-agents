@@ -174,7 +174,28 @@ def ensure_strategy_definition(conn) -> None:
         logger.info("Inserted strategy_definitions row for %s", STRATEGY_ID)
 
 
+def _weight_strengths(weights: Dict[str, float]) -> Dict[str, float]:
+    """t_82a67ac5: continuous 0-100 strength = midpoint percentile of the live
+    file's target weights (weights are the only signal metric available here).
+    score keeps its weight*100 semantics (rebalancer contract)."""
+    items = sorted(((t, float(w)) for t, w in weights.items()), key=lambda kv: (-kv[1], kv[0]))
+    n = len(items)
+    out: Dict[str, float] = {}
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and items[j + 1][1] == items[i][1]:
+            j += 1
+        avg_rank = (i + j) / 2.0 + 1.0
+        s = round(100.0 * (n - avg_rank + 0.5) / n, 2)
+        for k in range(i, j + 1):
+            out[items[k][0]] = s
+        i = j + 1
+    return out
+
+
 def insert_strategy_ticker_scores(conn, generated_at: str, weights: Dict[str, float]) -> None:
+    strengths = _weight_strengths(weights)
     with conn.cursor() as cur:
         for ticker, weight in weights.items():
             score = round(weight * 100.0, 6)
@@ -189,13 +210,14 @@ def insert_strategy_ticker_scores(conn, generated_at: str, weights: Dict[str, fl
                 "max_leverage": 1.0,
                 "max_single_asset_cap": 0.7,
                 "risk_review_decision": "APPROVED",
+                "strength_method": "midpoint_percentile_weight",
             })
             cur.execute(
                 """
                 INSERT INTO gold.strategy_ticker_scores
                 (strategy_id, ticker, score, signal_action, entry_score, exit_score,
-                 criteria_met, position_status, deployed_at, updated_at)
-                VALUES (%s, %s, %s, 'BUY', %s, 0.0, %s::jsonb, 'NONE', NOW(), NOW())
+                 criteria_met, position_status, deployed_at, updated_at, signal_strength)
+                VALUES (%s, %s, %s, 'BUY', %s, 0.0, %s::jsonb, 'NONE', NOW(), NOW(), %s)
                 ON CONFLICT (strategy_id, ticker) DO UPDATE SET
                     score = EXCLUDED.score,
                     signal_action = EXCLUDED.signal_action,
@@ -203,17 +225,21 @@ def insert_strategy_ticker_scores(conn, generated_at: str, weights: Dict[str, fl
                     exit_score = EXCLUDED.exit_score,
                     criteria_met = EXCLUDED.criteria_met,
                     position_status = EXCLUDED.position_status,
+                    signal_strength = EXCLUDED.signal_strength,
                     updated_at = EXCLUDED.updated_at;
                 """,
-                (STRATEGY_ID, ticker, score, score, criteria),
+                (STRATEGY_ID, ticker, score, score, criteria, strengths.get(ticker)),
             )
     logger.info("Upserted %d strategy_ticker_scores rows", len(weights))
 
 
 def insert_signal_evaluations(conn, weights: Dict[str, float]) -> None:
+    strengths = _weight_strengths(weights)
     with conn.cursor() as cur:
         for ticker, weight in weights.items():
-            potential = round(weight * 100.0, 6)
+            # t_82a67ac5: potential = continuous weight-percentile strength,
+            # not the raw weight*100 (mixed-unit bug).
+            potential = strengths.get(ticker)
             cur.execute(
                 """
                 SELECT change_1d FROM gold.kpis_metrics WHERE ticker = %s ORDER BY date DESC LIMIT 1;

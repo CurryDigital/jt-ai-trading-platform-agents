@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
-import sys
-sys.path.insert(0, '/home/ubuntu/.hermes/profiles/qr_etl/home/trading-platform/agents/etl/shared/scripts')
+###############################################################################
+# DANGER — DEPRECATED
+# This script drops consumption.performance_monthly_returns and recreates it as
+# a grouped VIEW. That breaks the daily ETL writers, which INSERT/UPSERT into the
+# table (see agents/etl/consumption/performance/performance_strategy_results.py
+# and agents/etl/consumption/portfolio/portfolio_performance_attribution.py).
+# It caused Pipeline A to fail on 2026-07-24 with:
+#   "cannot insert into view performance_monthly_returns"
+# DO NOT RUN without first confirming the target must be a view and coordinating
+# a corresponding ETL change. For history only.
+###############################################################################
+
+import sys, os
+sys.path.insert(0, 'shared/scripts')
 from db import get_connection
 
 conn = get_connection()
+
+# Rebuild the monthly returns view from ...
 cur = conn.cursor()
 
 cur.execute("""

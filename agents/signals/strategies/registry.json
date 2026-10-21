@@ -21,7 +21,11 @@
     "and strategies/stubs.py. They were idea placeholders with no implementation; the same strategy ideas",
     "are now tracked as real rows in the gold.strategy_registry DB table (PEAD, BTC funding carry, COT",
     "fade/contrarian, etc.), so keeping a second, dead copy here was pure duplication. Historical ids stay",
-    "retired \u2014 register new strategies with fresh ids to avoid colliding with old gold.strategy_signals rows."
+    "retired — register new strategies with fresh ids to avoid colliding with old gold.strategy_signals rows.",
+    "2026-10-09: legacy audit (qr_research) governance labels — optional field 'execution_status':",
+    "  OBSERVE_ONLY = enabled, signals logged to gold.strategy_signals + gold.regime_gate_decision_log,",
+    "  but NO order consumer may be wired without a SIM->PAPER gate pass. DISABLED = enabled:false.",
+    "  id 1 DISABLED; ids 2,6,11,15,16,18 OBSERVE_ONLY (id 11 also untradeable at book NAV)."
   ],
   "schema_version": 2,
   "retired_ids": [
@@ -46,7 +50,8 @@
       "class_path": "strategies.experimental.strategy_01:Strategy01",
       "tier": "experimental",
       "regime": "TREND",
-      "enabled": true,
+      "enabled": false,
+      "execution_status": "DISABLED",
       "asset_class": "equity",
       "params": {
         "basket": [
@@ -62,7 +67,7 @@
         "delta_short_threshold": -0.001,
         "vol_window": 20
       },
-      "notes": "Real implementation. Params still read from inside the class; migrate to read from this dict in a follow-up.",
+      "notes": "DISABLED 2026-10-09 per user decision (legacy audit, qr_research): only metric on record is gold.strategy_backtests id 1 sharpe -0.73, flagged UNVERIFIED_NON_PIT — fails the SIM->PAPER gate on its own numbers. No orders ever generated. Was: Real implementation. Params still read from inside the class; migrate to read from this dict in a follow-up.",
       "doc_id": "signal_agent_dual_ema_crossover"
     },
     {
@@ -72,9 +77,10 @@
       "tier": "experimental",
       "regime": "TREND",
       "enabled": true,
+      "execution_status": "OBSERVE_ONLY",
       "asset_class": "equity",
       "params": {},
-      "notes": "Real implementation.",
+      "notes": "OBSERVE_ONLY 2026-10-09 per user decision (legacy audit, qr_research): signals continue to gold.strategy_signals + gold.regime_gate_decision_log; NO order consumer may be wired without a SIM->PAPER gate pass. Reason: only metric on record (gold.strategy_backtests id 2) is byte-identical to id 3 (copy artifact) — no trustworthy run; flagged UNVERIFIED_NON_PIT. Was: Real implementation.",
       "doc_id": "signal_agent_52wk_high_momentum"
     },
     {
@@ -84,9 +90,10 @@
       "tier": "experimental",
       "regime": "TREND",
       "enabled": true,
+      "execution_status": "OBSERVE_ONLY",
       "asset_class": "crypto",
       "params": {},
-      "notes": "Real implementation.",
+      "notes": "OBSERVE_ONLY 2026-10-09 per user decision (legacy audit, qr_research): signals continue to gold.strategy_signals + gold.regime_gate_decision_log; NO order consumer may be wired without a SIM->PAPER gate pass. Reason: no backtest evidence anywhere in the platform. Was: Real implementation.",
       "doc_id": "signal_agent_btc_donchian_breakout"
     },
     {
@@ -96,9 +103,10 @@
       "tier": "experimental",
       "regime": "TREND",
       "enabled": true,
+      "execution_status": "OBSERVE_ONLY",
       "asset_class": "equity",
       "params": {},
-      "notes": "Real implementation.",
+      "notes": "OBSERVE_ONLY 2026-10-09 per user decision (legacy audit, qr_research): signals continue to gold.strategy_signals + gold.regime_gate_decision_log; NO order consumer may be wired without a SIM->PAPER gate pass. Reason: no backtest evidence; additionally UNTRADEABLE at current book NAV (~$32k USD) — E-mini futures sleeve is research-only for a future account size. Was: Real implementation.",
       "doc_id": "signal_agent_emini_trend_atr"
     },
     {
@@ -108,9 +116,10 @@
       "tier": "experimental",
       "regime": "TREND",
       "enabled": true,
+      "execution_status": "OBSERVE_ONLY",
       "asset_class": "commodity",
       "params": {},
-      "notes": "Real implementation.",
+      "notes": "OBSERVE_ONLY 2026-10-09 per user decision (legacy audit, qr_research): signals continue to gold.strategy_signals + gold.regime_gate_decision_log; NO order consumer may be wired without a SIM->PAPER gate pass. Reason: the 13 'natgas_seasonal' gold.strategy_backtest_runs rows are NG=F futures research probes (no regime gate), NOT this FCG/XLE implementation — no valid evidence for this strategy. Was: Real implementation.",
       "doc_id": "signal_agent_natgas_seasonal"
     },
     {
@@ -120,9 +129,10 @@
       "tier": "experimental",
       "regime": "TREND",
       "enabled": true,
+      "execution_status": "OBSERVE_ONLY",
       "asset_class": "fx",
       "params": {},
-      "notes": "Real implementation.",
+      "notes": "OBSERVE_ONLY 2026-10-09 per user decision (legacy audit, qr_research): signals continue to gold.strategy_signals + gold.regime_gate_decision_log; NO order consumer may be wired without a SIM->PAPER gate pass. Reason: no backtest evidence anywhere in the platform. Was: Real implementation.",
       "doc_id": "signal_agent_london_fx_breakout"
     },
     {
@@ -132,9 +142,10 @@
       "tier": "experimental",
       "regime": "TREND",
       "enabled": true,
+      "execution_status": "OBSERVE_ONLY",
       "asset_class": "fx",
       "params": {},
-      "notes": "Real implementation.",
+      "notes": "OBSERVE_ONLY 2026-10-09 per user decision (legacy audit, qr_research): signals continue to gold.strategy_signals + gold.regime_gate_decision_log; NO order consumer may be wired without a SIM->PAPER gate pass. Reason: no backtest evidence anywhere in the platform. Was: Real implementation.",
       "doc_id": "signal_agent_usdjpy_macro_trend"
     }
   ]

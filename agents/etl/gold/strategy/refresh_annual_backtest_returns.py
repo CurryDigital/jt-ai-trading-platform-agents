@@ -7,6 +7,14 @@ and serves them as the dashboard source of truth via gold.v_pipeline_ui_feed.
 
 Sources (in precedence order per year):
 1. gold.strategy_backtest_trades (ETL-owned) — computed by exit year.
+   GATED: skipped for strategies flagged in gold.strategy_configs with
+   config_key='trades_sum_is_book_annual_return' and config_value=false.
+   Rationale (kanban t_eb3b10f6): SUM(pnl_pct) by exit year is an unweighted,
+   non-compounded trade-level aggregate. It equals the book annual return ONLY
+   for equal-weight, full-capital, single-position books. For capital-splitting
+   book strategies (e.g. hk_ipo_postlisting_drift_p1_v3, 5x20% NAV slots) it
+   overstates the book return massively (V3 2024: sum +193.8% vs book +32.8%)
+   and contradicts returns_oos.
 2. Approved manifest IS annual_return for a calendar-2024 period.
 3. US-STK OOS equity curve calendar-year returns (2024-2026).
 4. Approved HK LowVol research backtester re-run to derive calendar-2024 from the
@@ -14,6 +22,18 @@ Sources (in precedence order per year):
 5. Approved manifest OOS annual_return as a fallback for 2024 when no calendar-year
    source exists.
 6. Audit CSV calendar-year annual_pnl_2025 and annual_pnl_2026.
+
+CORRECTION-PRESERVING SKIP (kanban t_589e846f): for strategies flagged
+trades_sum_is_book_annual_return=false, the annual_pnl_YYYY columns are owned by
+the correction pipeline (audit/apply_annual_pnl_correction.py, t_6ea23eae) which
+writes verified research book annuals. This ingest does NOT write those columns
+for flagged strategies — not from trades sums, and not from any other ingest
+source (manifest/audit CSV/equity curve are equally unverified against the
+corrected book values). Each skip is logged; when an ingest source disagreed with
+the preserved DB value (i.e. an overwrite was actually prevented), a per-column
+audit row is written to gold.strategy_backtest_runs_annual_pnl_audit with
+phase='ingest_skip' (old_value = preserved DB value, new_value = would-be
+overwrite).
 
 The script is idempotent and never overwrites a non-NULL ETL-computed value with a
 research fallback value.
@@ -68,6 +88,75 @@ def quantize(value: Optional[Decimal]) -> Optional[Decimal]:
     return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
+TRADES_SUM_CONFIG_KEY = "trades_sum_is_book_annual_return"
+
+# task_id recorded on phase='ingest_skip' audit rows. HERMES_KANBAN_TASK is set
+# when the ingest runs under a kanban worker; falls back to the script name for
+# cron/manual runs.
+AUDIT_TASK_ID = os.environ.get("HERMES_KANBAN_TASK") or "refresh_annual_backtest_returns"
+
+
+def pnl_differs(a: Optional[Decimal], b: Optional[Decimal]) -> bool:
+    """True if two quantized annual values disagree (NaN never equals anything)."""
+    if a is None and b is None:
+        return False
+    if a is None or b is None:
+        return True
+    if a.is_nan() or b.is_nan():
+        return True
+    return a != b
+
+
+def audit_ingest_skip(cur, strategy_id: str, run_id: str, diffs: Dict[str, Tuple[Optional[Decimal], Optional[Decimal]]]) -> int:
+    """Write per-column phase='ingest_skip' audit rows for a prevented overwrite.
+
+    SAVEPOINT-isolated so an audit failure never aborts the ingest transaction.
+    Returns the number of rows written (0 on failure).
+    """
+    cur.execute("SAVEPOINT annual_pnl_ingest_skip_audit")
+    try:
+        for year, (old_val, would_val) in sorted(diffs.items()):
+            cur.execute(
+                """
+                INSERT INTO gold.strategy_backtest_runs_annual_pnl_audit
+                    (phase, task_id, strategy_id, run_id, column_name,
+                     old_value, new_value, trades_sum_is_book_annual_return)
+                VALUES ('ingest_skip', %s, %s, %s, %s, %s, %s, false);
+                """,
+                (AUDIT_TASK_ID, strategy_id, run_id, f"annual_pnl_{year}", old_val, would_val),
+            )
+        cur.execute("RELEASE SAVEPOINT annual_pnl_ingest_skip_audit")
+        return len(diffs)
+    except Exception as e:
+        cur.execute("ROLLBACK TO SAVEPOINT annual_pnl_ingest_skip_audit")
+        logger.error("%s: failed to write ingest_skip audit rows: %s", strategy_id, e)
+        return 0
+
+
+def load_trades_sum_exclusions(cur, all_strategy_ids) -> set:
+    """Strategy IDs for which SUM(pnl_pct) over trades is NOT the book annual
+    return, per gold.strategy_configs.
+
+    t_fcfe5f4f (2026-09-21): default flipped to EXCLUDED. The trades-sum is a
+    valid book annual return ONLY for equal-weight, full-capital,
+    single-position books with a complete ledger, so it is now opt-IN: a
+    strategy uses the trades source only when the config key is explicitly
+    jsonb true (legacy keep-legacy trio H3/S14/S9). Everything else defaults
+    to excluded — book annuals must come from verified curve sources.
+    """
+    cur.execute(
+        """
+        SELECT strategy_id
+        FROM gold.strategy_configs
+        WHERE config_key = %s
+          AND config_value = 'true'::jsonb;
+        """,
+        (TRADES_SUM_CONFIG_KEY,),
+    )
+    allowed = {row["strategy_id"] for row in cur.fetchall()}
+    return set(all_strategy_ids) - allowed
+
+
 def annual_pnl_from_trades(cur, strategy_id: str) -> Dict[str, Optional[Decimal]]:
     cur.execute(
         """
@@ -76,12 +165,19 @@ def annual_pnl_from_trades(cur, strategy_id: str) -> Dict[str, Optional[Decimal]
                     ELSE SUM(pnl_pct) END AS pnl
         FROM gold.strategy_backtest_trades
         WHERE strategy_id = %s
+          AND exit_date IS NOT NULL
         GROUP BY EXTRACT(YEAR FROM exit_date)
         ORDER BY yr;
         """,
         (strategy_id,),
     )
-    by_year = {str(int(row["yr"])): quantize(row["pnl"]) for row in cur.fetchall()}
+    # Rows with NULL exit_date (open/never-closed trades) are excluded above;
+    # skip defensively in case the query ever changes.
+    by_year = {
+        str(int(row["yr"])): quantize(row["pnl"])
+        for row in cur.fetchall()
+        if row["yr"] is not None
+    }
     return {year: by_year.get(year) for year in YEARS}
 
 
@@ -233,10 +329,11 @@ def annual_pnl_from_us_stk_equity_curve() -> Dict[str, Dict[str, Optional[Decima
     return result
 
 
-def existing_annual_pnl(cur, strategy_id: str) -> Dict[str, Optional[Decimal]]:
+def latest_run_annual_pnl(cur, strategy_id: str) -> Tuple[Optional[str], Dict[str, Optional[Decimal]]]:
+    """Return (run_id, annual_pnl by year) for the latest run of a strategy."""
     cur.execute(
         """
-        SELECT annual_pnl_2024, annual_pnl_2025, annual_pnl_2026
+        SELECT run_id, annual_pnl_2024, annual_pnl_2025, annual_pnl_2026
         FROM gold.strategy_backtest_runs
         WHERE strategy_id = %s
         ORDER BY created_at DESC
@@ -246,12 +343,17 @@ def existing_annual_pnl(cur, strategy_id: str) -> Dict[str, Optional[Decimal]]:
     )
     row = cur.fetchone()
     if not row:
-        return {year: None for year in YEARS}
-    return {
+        return None, {year: None for year in YEARS}
+    return str(row["run_id"]), {
         "2024": quantize(row["annual_pnl_2024"]),
         "2025": quantize(row["annual_pnl_2025"]),
         "2026": quantize(row["annual_pnl_2026"]),
     }
+
+
+def existing_annual_pnl(cur, strategy_id: str) -> Dict[str, Optional[Decimal]]:
+    _, annuals = latest_run_annual_pnl(cur, strategy_id)
+    return annuals
 
 
 def resolve_annual_pnl(
@@ -321,11 +423,72 @@ def main():
         strategy_ids = [row["strategy_id"] for row in cur.fetchall()]
         logger.info("Found %d non-deprecated strategies to refresh", len(strategy_ids))
 
+        trades_sum_excluded = load_trades_sum_exclusions(cur, strategy_ids)
+        if trades_sum_excluded:
+            logger.info(
+                "trades-sum source gated OFF for %d capital-splitting strategies: %s",
+                len(trades_sum_excluded), ", ".join(sorted(trades_sum_excluded)),
+            )
+
         updated = 0
         unchanged = 0
         no_source = 0
+        skipped = 0
+        overwrites_prevented = 0
 
         for strategy_id in strategy_ids:
+            if strategy_id in trades_sum_excluded:
+                # Correction-preserving skip (t_589e846f): for flagged
+                # strategies the annual_pnl_YYYY columns are owned by the
+                # correction pipeline (audit/apply_annual_pnl_correction.py).
+                # Never write them here — not from trades sums and not from
+                # any other ingest source. Detect what the ingest WOULD have
+                # written (all non-trades sources, no existing_db fallback)
+                # and durably audit any prevented overwrite.
+                run_id, existing = latest_run_annual_pnl(cur, strategy_id)
+                manifest_is, manifest_oos = annual_pnl_from_manifest(strategy_id, manifest)
+                audit = annual_pnl_from_audit_csv(strategy_id)
+                us_stk = us_stk_by_id.get(strategy_id, {year: None for year in YEARS})
+                hk_lowvol = annual_pnl_from_hk_lowvol_backtest(strategy_id)
+                would, would_sources = resolve_annual_pnl(
+                    strategy_id,
+                    {year: None for year in YEARS},  # trades source gated off
+                    manifest_is,
+                    manifest_oos,
+                    audit,
+                    us_stk,
+                    hk_lowvol,
+                    {year: None for year in YEARS},  # no existing_db fallback
+                )
+                diffs = {
+                    year: (existing[year], would[year])
+                    for year in YEARS
+                    if would[year] is not None and pnl_differs(would[year], existing[year])
+                }
+                if diffs:
+                    detail = "; ".join(
+                        f"annual_pnl_{year}: db={old} preserved, ingest would have written {new}"
+                        for year, (old, new) in sorted(diffs.items())
+                    )
+                    audit_rows = audit_ingest_skip(cur, strategy_id, run_id, diffs) if run_id else 0
+                    logger.warning(
+                        "%s: correction-preserving skip (trades_sum_is_book_annual_return=false) — "
+                        "PREVENTED annual_pnl overwrite: %s (would-be sources: %s; audit_rows=%d)",
+                        strategy_id,
+                        detail,
+                        would_sources,
+                        audit_rows,
+                    )
+                    overwrites_prevented += 1
+                else:
+                    logger.info(
+                        "%s: correction-preserving skip (trades_sum_is_book_annual_return=false) — "
+                        "annual_pnl_YYYY untouched (owned by correction pipeline); no ingest source disagrees",
+                        strategy_id,
+                    )
+                skipped += 1
+                continue
+
             trades = annual_pnl_from_trades(cur, strategy_id)
             manifest_is, manifest_oos = annual_pnl_from_manifest(strategy_id, manifest)
             audit = annual_pnl_from_audit_csv(strategy_id)
@@ -336,6 +499,36 @@ def main():
             resolved, source_summary = resolve_annual_pnl(
                 strategy_id, trades, manifest_is, manifest_oos, audit, us_stk, hk_lowvol, existing
             )
+
+            # Compounding guard (t_fcfe5f4f): when the run's OOS window is fully
+            # covered by the 2024-2026 annual columns, the resolved annuals must
+            # chain to returns_oos within 2pp. A violation means the source
+            # values are not book-level annual returns — refuse the write.
+            cur.execute(
+                """
+                SELECT oos_start, oos_end, returns_oos
+                FROM gold.strategy_backtest_runs
+                WHERE strategy_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1;
+                """,
+                (strategy_id,),
+            )
+            _w = cur.fetchone()
+            if (
+                _w
+                and _w["oos_start"] and _w["oos_end"] and _w["returns_oos"] is not None
+                and _w["oos_start"] >= date(2024, 1, 1) and _w["oos_end"] <= date(2026, 12, 31)
+                and all(resolved[y] is not None for y in YEARS)
+            ):
+                chain = (Decimal("1") + resolved["2024"]) * (Decimal("1") + resolved["2025"]) * (Decimal("1") + resolved["2026"]) - Decimal("1")
+                if abs(chain - _w["returns_oos"]) > Decimal("0.02"):
+                    logger.warning(
+                        "%s: GUARD REJECT — resolved annuals chain %.4f != returns_oos %.4f; annual_pnl not written (sources: %s)",
+                        strategy_id, chain, _w["returns_oos"], source_summary,
+                    )
+                    skipped += 1
+                    continue
 
             def is_nan(v):
                 return isinstance(v, Decimal) and v.is_nan()
@@ -391,7 +584,10 @@ def main():
             updated += 1
 
         conn.commit()
-        logger.info("Done. updated=%d unchanged=%d no_source=%d total=%d", updated, unchanged, no_source, len(strategy_ids))
+        logger.info(
+            "Done. updated=%d unchanged=%d skipped_flagged=%d overwrites_prevented=%d no_source=%d total=%d",
+            updated, unchanged, skipped, overwrites_prevented, no_source, len(strategy_ids),
+        )
 
     except Exception as e:
         conn.rollback()

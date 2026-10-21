@@ -38,48 +38,46 @@ SELECT
 FROM bronze.ibkr_positions_live
 ON CONFLICT (account, ticker) DO UPDATE SET
   quantity          = EXCLUDED.quantity,
+  avg_cost          = EXCLUDED.avg_cost,
   market_price      = EXCLUDED.market_price,
   market_value      = EXCLUDED.market_value,
   unrealized_pnl    = EXCLUDED.unrealized_pnl,
   unrealized_pnl_pct = EXCLUDED.unrealized_pnl_pct,
+  side              = EXCLUDED.side,
+  asset_class       = EXCLUDED.asset_class,
+  currency          = EXCLUDED.currency,
   fetched_at        = EXCLUDED.fetched_at;
 """
 
-SQL_SNAPSHOT = """
-WITH latest_account AS (
-    SELECT
-        net_liquidation,
-        COALESCE(cash_hkd, 0) + COALESCE(cash_usd, 0) AS cash_value
-    FROM gold.ibkr_account_summary
-    ORDER BY fetched_at DESC
-    LIMIT 1
-),
-position_summary AS (
-    SELECT
-        COALESCE(SUM(market_value), 0) AS raw_positions_value,
-        COALESCE(SUM(unrealized_pnl), 0) AS daily_pnl,
-        COALESCE(SUM(ABS(market_value)), 0) AS gross_exposure,
-        COALESCE(SUM(CASE WHEN side = 'SHORT' THEN -ABS(market_value) ELSE market_value END), 0) AS net_exposure
-    FROM gold.ibkr_positions_live
-)
+# t_65d96f4a: native columns carry the account base currency (HKD for
+# DUP825942); *_usd columns are converted via shared/scripts/fx.py
+# (gold.fx_rates). gross/net exposure and daily_pnl are contract-currency
+# (USD for the US book) and are mirrored into *_usd with that made explicit.
+SQL_SNAPSHOT_NATIVE = """
+SELECT net_liquidation, COALESCE(cash_hkd, 0), COALESCE(cash_usd, 0),
+       COALESCE(base_currency, 'HKD')
+FROM gold.ibkr_account_summary
+ORDER BY fetched_at DESC
+LIMIT 1
+"""
+
+SQL_SNAPSHOT_POSITIONS = """
+SELECT COALESCE(SUM(unrealized_pnl), 0) AS daily_pnl,
+       COALESCE(SUM(ABS(market_value)), 0) AS gross_exposure,
+       COALESCE(SUM(CASE WHEN side = 'SHORT' THEN -ABS(market_value) ELSE market_value END), 0) AS net_exposure
+FROM gold.ibkr_positions_live
+"""
+
+SQL_SNAPSHOT_INSERT = """
 INSERT INTO gold.portfolio_snapshots
   (snapshot_date, portfolio_type,
    total_value, cash_value, positions_value,
    daily_pnl, daily_pnl_pct,
    gross_exposure, net_exposure,
+   currency, total_value_usd, cash_value_usd, positions_value_usd,
+   gross_exposure_usd, net_exposure_usd, fx_rate, fx_date,
    calculated_at)
-SELECT
-  CURRENT_DATE,
-  'live' AS portfolio_type,
-  la.net_liquidation AS total_value,
-  la.cash_value,
-  COALESCE(la.net_liquidation, 0) - la.cash_value AS positions_value,
-  ps.daily_pnl,
-  ps.daily_pnl / NULLIF(la.net_liquidation - la.cash_value, 0) * 100 AS daily_pnl_pct,
-  ps.gross_exposure,
-  ps.net_exposure,
-  NOW()
-FROM position_summary ps, latest_account la
+VALUES (%s, 'live', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
 ON CONFLICT (snapshot_date, portfolio_type) DO UPDATE SET
   total_value       = EXCLUDED.total_value,
   cash_value        = EXCLUDED.cash_value,
@@ -88,8 +86,55 @@ ON CONFLICT (snapshot_date, portfolio_type) DO UPDATE SET
   daily_pnl_pct     = EXCLUDED.daily_pnl_pct,
   gross_exposure    = EXCLUDED.gross_exposure,
   net_exposure      = EXCLUDED.net_exposure,
+  currency          = EXCLUDED.currency,
+  total_value_usd   = EXCLUDED.total_value_usd,
+  cash_value_usd    = EXCLUDED.cash_value_usd,
+  positions_value_usd = EXCLUDED.positions_value_usd,
+  gross_exposure_usd = EXCLUDED.gross_exposure_usd,
+  net_exposure_usd  = EXCLUDED.net_exposure_usd,
+  fx_rate           = EXCLUDED.fx_rate,
+  fx_date           = EXCLUDED.fx_date,
   calculated_at     = NOW();
 """
+
+
+def write_snapshot(cur):
+    import fx  # shared conversion layer — missing/stale rate raises loudly
+    cur.execute(SQL_SNAPSHOT_NATIVE)
+    row = cur.fetchone()
+    if not row:
+        print("⚠️  no gold.ibkr_account_summary row — skipping snapshot")
+        return 0
+    net_liq, cash_hkd, cash_usd, base_ccy = row
+    net_liq = float(net_liq or 0)
+    cash_hkd = float(cash_hkd)
+    cash_usd = float(cash_usd)
+    # native (base-ccy) cash via the layer — never raw-summed across ccys
+    if base_ccy == 'HKD':
+        cash_usd_native, _, _ = fx.convert(cur, cash_usd, 'USD', base_ccy)
+        cash_native = cash_hkd + cash_usd_native
+    else:
+        cash_hkd_native, _, _ = fx.convert(cur, cash_hkd, 'HKD', base_ccy)
+        cash_native = cash_hkd_native + cash_usd
+    total_usd, rate, fx_date = fx.to_usd(cur, net_liq, base_ccy)
+    cash_usd_total, _, _ = fx.to_usd(cur, cash_native, base_ccy)
+    positions_value = net_liq - cash_native
+    positions_value_usd = total_usd - cash_usd_total
+
+    cur.execute(SQL_SNAPSHOT_POSITIONS)
+    pnl_usd, gross_usd, net_usd = cur.fetchone()
+    pnl_usd = float(pnl_usd or 0)
+    pnl_pct = (pnl_usd / positions_value_usd * 100) if positions_value_usd else 0
+
+    cur.execute(SQL_SNAPSHOT_INSERT, (
+        date.today(),
+        net_liq, cash_native, positions_value,
+        pnl_usd, pnl_pct,
+        float(gross_usd or 0), float(net_usd or 0),
+        base_ccy, total_usd, cash_usd_total, positions_value_usd,
+        float(gross_usd or 0), float(net_usd or 0), rate, fx_date,
+    ))
+    return cur.rowcount
 
 def run():
     conn = get_connection()
@@ -107,16 +152,22 @@ def run():
     if has_positions_table:
         cur.execute(SQL_SYNC_POSITIONS)
         print(f"✅ gold.ibkr_positions_live synced: {cur.rowcount} rows upserted")
-        cur.execute(SQL_SNAPSHOT)
-        print(f"✅ gold.portfolio_snapshots updated: {cur.rowcount} rows upserted")
+        n = write_snapshot(cur)
+        print(f"✅ gold.portfolio_snapshots updated: {n} rows upserted")
     else:
         print("⚠️  gold.ibkr_positions_live does not exist — skipping position sync")
-    
-    # Also sync account summary from bronze to gold
+
+    # Also sync account summary from bronze to gold (currency-labeled, t_65d96f4a)
     cur.execute("""
         INSERT INTO gold.ibkr_account_summary
-            (account, net_liquidation, cash_hkd, cash_usd, available_funds, buying_power, position_count, fetched_at)
-        SELECT account, net_liquidation, cash_hkd, cash_usd, available_funds, buying_power, position_count, fetched_at
+            (account, net_liquidation, cash_hkd, cash_usd, available_funds, buying_power,
+             position_count, fetched_at,
+             base_currency, net_liquidation_usd, available_funds_usd,
+             buying_power_usd, cash_total_usd, fx_rate, fx_date)
+        SELECT account, net_liquidation, cash_hkd, cash_usd, available_funds, buying_power,
+               position_count, fetched_at,
+               base_currency, net_liquidation_usd, available_funds_usd,
+               buying_power_usd, cash_total_usd, fx_rate, fx_date
         FROM bronze.ibkr_account_summary
         ON CONFLICT (account) DO UPDATE SET
             net_liquidation = EXCLUDED.net_liquidation,
@@ -125,6 +176,13 @@ def run():
             available_funds = EXCLUDED.available_funds,
             buying_power = EXCLUDED.buying_power,
             position_count = EXCLUDED.position_count,
+            base_currency = EXCLUDED.base_currency,
+            net_liquidation_usd = EXCLUDED.net_liquidation_usd,
+            available_funds_usd = EXCLUDED.available_funds_usd,
+            buying_power_usd = EXCLUDED.buying_power_usd,
+            cash_total_usd = EXCLUDED.cash_total_usd,
+            fx_rate = EXCLUDED.fx_rate,
+            fx_date = EXCLUDED.fx_date,
             fetched_at = EXCLUDED.fetched_at;
     """)
     print(f"✅ gold.ibkr_account_summary synced: {cur.rowcount} rows upserted")

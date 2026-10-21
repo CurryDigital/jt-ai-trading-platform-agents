@@ -40,7 +40,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 STRATEGY_ID = "ETF_US_Sector_Relative_Momentum"
-TOP_N = 3
+# 2026-09-18 (kanban t_3741eba6): KEEP-TUNED params from gold.strategy_backtest_runs
+# run_number=4 — top_n 3->4, per-name sleeve 0.30->0.225, cash residual stays 0.10.
+# Holdout-validated 2026-07-01..2026-09-17: +1.15%, Sharpe 0.45.
+TOP_N = 4
+SLEEVE_WEIGHT = 22.5  # percent per top-N name; 4 x 22.5 + 10 cash = 100
 # 2026-07-22: lookbacks are CALENDAR days (fetch_closest_price finds the close
 # on-or-before target_date). The old values (21/63/126/252) were trading-day
 # counts used as calendar-day deltas, so "1m" was really ~15 trading days and
@@ -140,10 +144,10 @@ def compute_momentum(cur, ticker: str, latest_date: date) -> Optional[MomentumRo
 def assign_scores(rows: List[MomentumRow]) -> Dict[str, Dict]:
     """Rank by composite momentum, assign BUY/NEUTRAL and target weights.
 
-    Research handoff target for this strategy is 30/30/30 per the top-3
-    momentum names, with 10% residual cash. Scores are therefore emitted as
-    percentages that sum to 100 so the position rebalancer can use them as
-    target weights directly.
+    Research handoff target for this strategy is 22.5% per top-4 momentum
+    names (tuned 2026-09-18, run_number=4; previously 30/30/30 top-3), with
+    10% residual cash. Scores are therefore emitted as percentages that sum
+    to 100 so the position rebalancer can use them as target weights directly.
     """
     sorted_rows = sorted(
         rows,
@@ -158,7 +162,7 @@ def assign_scores(rows: List[MomentumRow]) -> Dict[str, Dict]:
     for row in sorted_rows:
         if row.rank <= TOP_N:
             action = "BUY"
-            score = 30.0
+            score = SLEEVE_WEIGHT
         else:
             action = "HOLD"
             score = 0.0
@@ -184,7 +188,7 @@ def assign_scores(rows: List[MomentumRow]) -> Dict[str, Dict]:
         "entry_score": 0.0,
         "exit_score": 0.0,
         "criteria_met": {
-            "rationale": "residual cash per 30% max-weight cap",
+            "rationale": "residual cash per 22.5% sleeve x top-4 tuned design (t_3741eba6)",
             "rebalanced_at": datetime.now(timezone.utc).isoformat(),
         },
     }

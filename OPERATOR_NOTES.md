@@ -5,6 +5,45 @@ operator. Last updated: 2026-07-10 (ETL + signals folder review).
 
 ---
 
+## Canonical paper-account sources of truth (declared 2026-08-22, t_8a128994)
+
+Three-layer model — do not conflate:
+
+1. **Broker ground truth** = `gold.ibkr_positions_live` (IBKR paper acct
+   DUP825942, synced by `sync_ibkr_to_gold.py` in the daily cycle; feeds the
+   Paper account page). As of 2026-08-22 this matches the broker exactly:
+   1 position (10 AAPL @ 314.66 USD).
+2. **Simulated strategy ledger (CANONICAL for strategy paper trading)** =
+   `gold.paper_trades_synthetic`, gated on
+   `gold.strategy_paper_monitoring.is_active = true`. This engine NEVER sends
+   orders to IBKR — it is a simulation book. Its account-level projection is
+   `consumption.portfolio_positions_current` (PAPER_TRADING rows), refreshed
+   by `agents/etl/consumption/portfolio/sync_paper_positions_current.py`
+   after `rebuild_paper_positions.py` in the signal cycle.
+3. **Paper tab (Execution > Paper 'Open Positions')** =
+   `gold.v_paper_open_positions`. Repointed 2026-08-22 from the ORPHANED
+   `gold.paper_trades` to the canonical gated synthetic ledger (2). Verified:
+   API `/api/agents/paper/open-positions` returns 77 rows, per-strategy
+   counts identical to `portfolio_positions_current` PAPER_TRADING ACTIVE.
+
+`gold.paper_trades` is ORPHANED (writer `refresh_paper_trades.py` is in no
+cycle/manifest; open rows frozen 2026-07-25, closed 2026-08-05). The stalled
+updater was deliberately NOT revived — reviving it would maintain a third
+divergent book. The Paper tab now reads the live canonical ledger, so there
+is no stalled updater left to repair. Do not read `gold.paper_trades` for
+current state.
+
+Known divergence that is ARCHITECTURAL, not a bug: the simulated ledger (2)
+books positions the broker (1) never received, because the paper engine does
+not place IBKR orders. NAV/cash tracking approx matches the broker
+(paper_nav_hkd ≈ NetLiquidation) while position-level sync vs broker does
+not exist by design.
+
+Residual: `backend/app/routes/command.py` still reads `gold.paper_trades`
+for some Command KPIs — flagged as follow-up to qr_frontend.
+
+---
+
 ## ⚠️ Action required
 
 ### 1. Server cron still points at old signal-script paths
@@ -19,6 +58,27 @@ call `agents/signals/run_signal_cycle.sh` for the signal stage (or drop the
 strategy entries). Details: `agents/signals/pipeline/README.md`.
 
 - [ ] pipeline_b_signals.sh updated on server
+
+### 1b. Apply migration 014 — fix `consumption.performance_monthly_returns` casing
+Pipeline A failed on 2026-07-24 because `consumption.performance_monthly_returns`
+had been recreated as a grouped VIEW (since restored to a table by migration 013).
+Migration 014 normalizes any existing `PAPER` rows to `paper` and installs a
+BEFORE-trigger that forces lowercase `portfolio_type` on both
+`consumption.performance_monthly_returns` and
+`consumption.performance_strategy_attribution`, preventing duplicate-key
+conflicts from casing drift.
+
+Apply on prod:
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f db_setup/migrations/014_normalize_performance_monthly_returns_keys.sql
+
+Code guards were also added to the two writers:
+- `agents/etl/consumption/performance/performance_strategy_results.py`
+- `agents/etl/consumption/portfolio/portfolio_performance_attribution.py`
+
+Both now call `require_table(...)` before INSERT and fail with a clear message
+if the target is ever a view again.
+
+- [ ] migration 014 applied on prod
 
 ### 1d. Apply migration 010 + resolve strategy signal-mechanism (ROADMAP G2)
 Migration 010 adds gold.strategy_registry.signal_mechanism and
@@ -266,6 +326,45 @@ once the feed resumes. Diagnose the FX ingestion cron / IBKR FX bar puller.
 
 
 ---
+
+### 8. Paper bookkeeping map (kanban t_9579ff7c, 2026-07-31) — read before touching paper tables
+The paper stack has THREE ledgers/registries with overlapping names. Only one
+of each is live:
+
+- **Canonical paper ledger = `gold.paper_trades_synthetic`** (lot-sized —
+  US whole shares since 2026-08-17 (t_928a4e7d, see
+  `etl/docs/decisions/2026-08-17_lot_convention.md`), HK/SG board lots,
+  futures unit-sized; capital-capped; written by
+  `gold/strategy/rebuild_paper_positions.py` and
+  `refresh_paper_trades_synthetic.py`). It is a SHADOW ledger for all approved
+  pipeline strategies; only `gold.strategy_paper_monitoring.is_active=true`
+  strategies are genuinely paper trading (t_f51d67fe).
+- **`gold.paper_trades` = ORPHANED.** Its writer `refresh_paper_trades.py` is
+  not in the signal cycle or pipeline manifest; rows went stale 2026-07-23.
+  Its NULL `n_shares` rows are missing-weight artifacts (writer cannot parse
+  the computed-engine `signal_criteria` JSON, which has no `weight` key), NOT
+  real zero-share positions. Do not build on this table.
+- **`gold.paper_strategies` = LEGACY 6-row strategy-level stub, not engine
+  config.** No live ETL reader: `market_overview.py`'s SUMMARY_CARDS_SQL that
+  references it is never executed; `portfolio_positions_risk.py` /
+  `portfolio_performance_attribution.py` mention it only in docstrings;
+  backend readers (`jt_strategy_executor`, `backtest_engine`) expect a
+  position-level schema that does not exist and fail silently
+  (`/api/positions/signals` returns `data_not_available`). The LIVE engine
+  gating is `gold.strategy_registry.execution_mode='PAPER'` +
+  `gold.strategy_paper_monitoring.is_active`. UI "7 Paper Active" comes from
+  the monitoring table, which is correct.
+- **`gold.v_paper_system_status` `paper_nav_usd=32000` / `paper_nav_hkd=
+  250000` are HARDCODED literals** in the view definition, not funding state.
+- **Registry `in_market_capital`** is synced from the synthetic ledger by
+  `gold/strategy/sync_registry_in_market_capital.py` (signal-cycle step after
+  the rebalancer; added 2026-07-31). Monitored PAPER => SUM(n_shares*
+  entry_price) of open rows; unmonitored/retired PAPER => 0.
+- **UI "Monitoring Active/Idle"** = presence of ACTIVE PAPER_TRADING rows in
+  `consumption.portfolio_positions_current` (backend pipeline-feed), refreshed
+  daily by `sync_paper_positions_current.py`. A flat-book strategy
+  (all-SELL signals) correctly shows Idle — it means "no open positions",
+  not "not watched".
 
 ## 🐞 Signal-correctness bugs found & fixed (2026-07-22 internal review)
 

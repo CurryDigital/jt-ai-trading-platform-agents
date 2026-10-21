@@ -12,6 +12,12 @@ Writes to:
 - gold.trade_executions (idempotent: deletes existing PAPER strategy rows first)
 - consumption.Performance_Monthly_Returns (view created/replaced)
 - consumption.Strategies_Signals_Current (refreshed for PAPER strategies)
+
+DANGER — DEPRECATED: the view creation/replacement in this script drops the
+consumption.performance_monthly_returns TABLE and recreates it as a grouped
+VIEW, which breaks the daily ETL INSERT/UPSERT. It caused Pipeline A to fail
+on 2026-07-24. Do not run the view-creation portion without coordinating an ETL
+change. Kept for history only.
 """
 import glob
 import json

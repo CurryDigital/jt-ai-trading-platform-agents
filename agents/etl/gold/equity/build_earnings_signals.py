@@ -42,7 +42,10 @@ ON CONFLICT (symbol, earnings_date) DO UPDATE SET
   surprise_category   = EXCLUDED.surprise_category,
   signal_window_start = EXCLUDED.signal_window_start,
   signal_window_end   = EXCLUDED.signal_window_end,
-  created_at          = NOW();
+  created_at          = NOW()
+-- 2026-10-17: don't blanket-restamp unchanged rows (destroys vintage).
+WHERE gold.earnings_signals.eps_surprise_pct  IS DISTINCT FROM EXCLUDED.eps_surprise_pct
+   OR gold.earnings_signals.surprise_category IS DISTINCT FROM EXCLUDED.surprise_category;
 """
 
 SQL_DATA = """
@@ -58,7 +61,11 @@ ON CONFLICT (ticker, report_date) DO UPDATE SET
   actual_eps     = EXCLUDED.actual_eps,
   estimate_eps   = EXCLUDED.estimate_eps,
   surprise_pct   = EXCLUDED.surprise_pct,
-  collected_at   = NOW();
+  collected_at   = NOW()
+-- 2026-10-17: don't blanket-restamp unchanged rows.
+WHERE gold.earnings_data.actual_eps   IS DISTINCT FROM EXCLUDED.actual_eps
+   OR gold.earnings_data.estimate_eps IS DISTINCT FROM EXCLUDED.estimate_eps
+   OR gold.earnings_data.surprise_pct IS DISTINCT FROM EXCLUDED.surprise_pct;
 """
 
 SQL_SUE = """
@@ -80,18 +87,39 @@ ON CONFLICT (ticker, report_date) DO UPDATE SET
   sue            = EXCLUDED.sue,
   sue_decile     = EXCLUDED.sue_decile,
   sue_category   = EXCLUDED.sue_category,
-  calculated_at  = NOW();
+  calculated_at  = NOW()
+-- 2026-10-17: only rewrite (and re-stamp calculated_at) when a value actually
+-- changed. Previously every daily run re-stamped all 17.8k rows, destroying
+-- compute vintage (the 2026-08-05 handoff audit hit this).
+WHERE gold.sue_scores.sue            IS DISTINCT FROM EXCLUDED.sue
+   OR gold.sue_scores.sue_decile     IS DISTINCT FROM EXCLUDED.sue_decile
+   OR gold.sue_scores.sue_category   IS DISTINCT FROM EXCLUDED.sue_category
+   OR gold.sue_scores.actual_eps     IS DISTINCT FROM EXCLUDED.actual_eps
+   OR gold.sue_scores.estimate_eps   IS DISTINCT FROM EXCLUDED.estimate_eps
+   OR gold.sue_scores.surprise_pct   IS DISTINCT FROM EXCLUDED.surprise_pct;
 """
 
 def run():
+    from snapshot_guard import require_snapshot_id, log_snapshot
+    snapshot_id = require_snapshot_id(
+        "gold.sue_scores / gold.earnings_signals / gold.earnings_data (full upsert)",
+        "gold/equity/build_earnings_signals.py")
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("SELECT count(*) FROM gold.sue_scores")
+    pre_sue = cur.fetchone()[0]
     cur.execute(SQL_SIGNALS)
     print(f"✅ gold.earnings_signals: {cur.rowcount} rows upserted")
     cur.execute(SQL_DATA)
     print(f"✅ gold.earnings_data: {cur.rowcount} rows upserted")
     cur.execute(SQL_SUE)
     print(f"✅ gold.sue_scores: {cur.rowcount} rows upserted")
+    cur.execute("SELECT count(*) FROM gold.sue_scores")
+    post_sue = cur.fetchone()[0]
+    log_snapshot(cur, snapshot_id,
+                 "gold.sue_scores full upsert", "gold/equity/build_earnings_signals.py",
+                 pre_sue, post_sue,
+                 f"rowcounts this run in stdout; calculated_at only re-stamped on value change")
     conn.commit()
     conn.close()
 

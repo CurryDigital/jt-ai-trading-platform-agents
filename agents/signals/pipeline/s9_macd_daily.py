@@ -93,10 +93,31 @@ def find_signals(conn):
     """)
     rows = cur.fetchall()
     cur.close()
-    return rows
+    # psycopg2 returns numeric columns as decimal.Decimal; coerce DB-derived
+    # numerics to float here so downstream arithmetic against the float
+    # thresholds (ENTRY_HIST_THRESH etc.) cannot TypeError. (Fix 2026-09-18:
+    # insert_signal crashed on `macd_hist - ENTRY_HIST_THRESH`.)
+    out = []
+    for ticker, date, close, volume, prev_close, macd_hist, prev_macd_hist, volume_ratio in rows:
+        out.append((
+            ticker, date,
+            float(close) if close is not None else None,
+            int(volume) if volume is not None else None,
+            float(prev_close) if prev_close is not None else None,
+            float(macd_hist) if macd_hist is not None else None,
+            float(prev_macd_hist) if prev_macd_hist is not None else None,
+            float(volume_ratio) if volume_ratio is not None else None,
+        ))
+    return out
 
 
 def insert_signal(conn, ticker, signal_date, entry_date, macd_hist, prev_macd_hist, volume_ratio, entry_price):
+    # Coerce to float: DB numerics arrive as decimal.Decimal and cannot be
+    # mixed with float thresholds in arithmetic.
+    macd_hist = float(macd_hist)
+    prev_macd_hist = float(prev_macd_hist) if prev_macd_hist is not None else None
+    volume_ratio = float(volume_ratio) if volume_ratio is not None else None
+    entry_price = float(entry_price)
     signal_strength = round(macd_hist - ENTRY_HIST_THRESH, 6)
     cur = conn.cursor()
     cur.execute("""

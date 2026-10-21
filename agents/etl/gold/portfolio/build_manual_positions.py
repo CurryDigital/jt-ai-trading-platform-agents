@@ -10,20 +10,43 @@ os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 
 SQL_UPSERT_MANUAL = """
+-- 2026-09-12 (t_bb898628): conflict key is (strategy_id, ticker) but the old
+-- GROUP BY (ticker, side, DATE(created_at), entry_price) emitted one row per
+-- fill — a second filled order for the same ticker (e.g. GLD buy+sell from the
+-- paper_uat reconciler) produced duplicate constrained values and a
+-- CardinalityViolation. Now net to ONE row per ticker: BUY qty positive,
+-- SELL qty negative; flat (net 0) tickers are closed and skipped.
 INSERT INTO consumption.portfolio_positions_current (
     strategy_id, ticker, side, entry_date, entry_price, current_price,
     quantity, market_value, weight_pct, unrealized_pnl, realized_pnl,
     status, source, execution_mode, updated_at, created_at
 )
+WITH netted AS (
+    SELECT
+        ticker,
+        SUM(CASE WHEN side = 'SELL' THEN -qty ELSE qty END) AS net_qty,
+        COALESCE(
+            SUM(CASE WHEN side <> 'SELL' THEN qty * COALESCE(entry_price, 0) END)
+            / NULLIF(SUM(CASE WHEN side <> 'SELL' THEN qty END), 0),
+            AVG(COALESCE(entry_price, 0)),
+            0
+        ) AS wavg_entry,
+        MIN(DATE(created_at)) AS entry_date,
+        MIN(created_at) AS created_at
+    FROM gold.manual_orders
+    WHERE status IN ('accepted', 'open', 'filled')
+    GROUP BY ticker
+    HAVING SUM(CASE WHEN side = 'SELL' THEN -qty ELSE qty END) <> 0
+)
 SELECT
     'MANUAL' AS strategy_id,
     ticker,
-    COALESCE(side, 'LONG') AS side,
-    DATE(created_at) AS entry_date,
-    COALESCE(entry_price, 0) AS entry_price,
-    COALESCE(entry_price, 0) AS current_price,
-    SUM(qty) AS quantity,
-    SUM(qty * COALESCE(entry_price, 0)) AS market_value,
+    CASE WHEN net_qty < 0 THEN 'SHORT' ELSE 'LONG' END AS side,
+    entry_date,
+    wavg_entry AS entry_price,
+    wavg_entry AS current_price,
+    ABS(net_qty) AS quantity,
+    ABS(net_qty) * wavg_entry AS market_value,
     100.0 AS weight_pct,
     0 AS unrealized_pnl,
     0 AS realized_pnl,
@@ -31,11 +54,9 @@ SELECT
     'manual' AS source,
     'MANUAL' AS execution_mode,
     NOW() AS updated_at,
-    MIN(created_at) AS created_at
-FROM gold.manual_orders
-WHERE status IN ('accepted', 'open', 'filled')
-GROUP BY ticker, side, DATE(created_at), entry_price
-ON CONFLICT ON CONSTRAINT portfolio_positions_current_ticker_key
+    created_at
+FROM netted
+ON CONFLICT (strategy_id, ticker)
 DO UPDATE SET
     strategy_id    = EXCLUDED.strategy_id,
     side           = EXCLUDED.side,

@@ -67,10 +67,18 @@ CREATE TABLE IF NOT EXISTS consumption.portfolio_allocation_breakdown (
 
 # ── Live positions (IBKR + manual orders) ─────────────────────────────────────
 POSITIONS_LIVE_SQL = """
-TRUNCATE consumption.portfolio_positions_current;
+-- 2026-07-29 (t_749e13f0): was TRUNCATE. The table now also carries
+-- PAPER_TRADING rows synced from gold.paper_trades_synthetic
+-- (sync_paper_positions_current.py); only clear the live/manual rows this
+-- statement owns.
+DELETE FROM consumption.portfolio_positions_current
+WHERE execution_mode IN ('LIVE_TRADING', 'MANUAL')
+   OR source IN ('ibkr', 'manual');
 
 WITH live_equity AS (
-    SELECT COALESCE(net_liquidation, 0) AS equity
+    -- t_65d96f4a: market_value is USD (contract ccy); the denominator must
+    -- be USD too. Was net_liquidation (HKD base) -> weights understated 7.85x.
+    SELECT COALESCE(net_liquidation_usd, 0) AS equity
     FROM gold.ibkr_account_summary
     ORDER BY fetched_at DESC
     LIMIT 1
@@ -95,27 +103,45 @@ live_ibkr AS (
     WHERE quantity IS NOT NULL AND market_value IS NOT NULL
 ),
 manual_agg AS (
+    -- 2026-09-12 (t_bb898628): was GROUP BY ticker, side — a second filled
+    -- order for the same ticker (GLD buy+sell from the paper_uat reconciler)
+    -- produced duplicate (strategy_id, ticker) keys -> CardinalityViolation.
+    -- Net to ONE row per ticker (BUY + / SELL -); skip flat tickers.
     SELECT
         'MANUAL' AS strategy_id,
         ticker,
-        COALESCE(side, 'LONG') AS side,
-        COALESCE(AVG(entry_price), 0) AS entry_price,
-        COALESCE(AVG(entry_price), 0) AS current_price,
-        SUM(qty) AS quantity,
-        CASE WHEN COALESCE(side, 'LONG') = 'SHORT'
-             THEN -ABS(SUM(qty * COALESCE(entry_price, 0)))
-             ELSE SUM(qty * COALESCE(entry_price, 0))
+        CASE WHEN net_qty < 0 THEN 'SHORT' ELSE 'LONG' END AS side,
+        wavg_entry AS entry_price,
+        wavg_entry AS current_price,
+        ABS(net_qty) AS quantity,
+        CASE WHEN net_qty < 0
+             THEN -ABS(net_qty * wavg_entry)
+             ELSE ABS(net_qty * wavg_entry)
         END AS market_value,
         0 AS unrealized_pnl,
         0 AS realized_pnl,
         'OPEN' AS status,
-        MIN(DATE(created_at)) AS entry_date,
+        entry_date,
         'manual' AS source,
         'MANUAL' AS execution_mode,
-        MIN(created_at) AS created_at
-    FROM gold.manual_orders
-    WHERE status IN ('accepted', 'open', 'filled')
-    GROUP BY ticker, COALESCE(side, 'LONG')
+        created_at
+    FROM (
+        SELECT
+            ticker,
+            SUM(CASE WHEN side = 'SELL' THEN -qty ELSE qty END) AS net_qty,
+            COALESCE(
+                SUM(CASE WHEN side <> 'SELL' THEN qty * COALESCE(entry_price, 0) END)
+                / NULLIF(SUM(CASE WHEN side <> 'SELL' THEN qty END), 0),
+                AVG(COALESCE(entry_price, 0)),
+                0
+            ) AS wavg_entry,
+            MIN(DATE(created_at)) AS entry_date,
+            MIN(created_at) AS created_at
+        FROM gold.manual_orders
+        WHERE status IN ('accepted', 'open', 'filled')
+        GROUP BY ticker
+        HAVING SUM(CASE WHEN side = 'SELL' THEN -qty ELSE qty END) <> 0
+    ) n
 ),
 combined AS (
     SELECT * FROM live_ibkr
@@ -151,7 +177,7 @@ SELECT
     execution_mode,
     created_at
 FROM combined, total_val t, live_equity le
-ON CONFLICT (ticker) DO UPDATE SET
+ON CONFLICT (strategy_id, ticker) DO UPDATE SET
     strategy_id    = EXCLUDED.strategy_id,
     side           = EXCLUDED.side,
     entry_date     = EXCLUDED.entry_date,

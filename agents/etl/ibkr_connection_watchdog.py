@@ -57,6 +57,27 @@ GATEWAY_CONTAINER = os.environ.get("IBKR_GATEWAY_CONTAINER", "algo-trader-ib-gat
 TUNNEL_SERVICE = os.environ.get("IBKR_TUNNEL_SERVICE", "ibkr-tunnel.service")
 RESTART_COOLDOWN_SECONDS = int(os.environ.get("IBKR_WATCHDOG_RESTART_COOLDOWN_SECONDS", "900"))  # 15 min
 
+# Gateway container recovery (t_94a03f84): when the probe keeps failing because the
+# gateway itself is LOGGED_OUT (e.g. IBKR login lockout that IBC never retries),
+# restarting the ssh tunnel is useless — the container must be restarted instead.
+CONTAINER_RESTART_COOLDOWN_SECONDS = int(os.environ.get("IBKR_WATCHDOG_CONTAINER_RESTART_COOLDOWN_SECONDS", "3600"))  # 1h
+FAIL_THRESHOLD = int(os.environ.get("IBKR_WATCHDOG_FAIL_THRESHOLD", "3"))  # consecutive failed probes before container action
+GATEWAY_LOG_WINDOW = os.environ.get("IBKR_GATEWAY_LOG_WINDOW", "45m")  # docker logs --since window for login-state classification
+CONTAINER_LOGIN_WAIT_SECONDS = int(os.environ.get("IBKR_WATCHDOG_CONTAINER_LOGIN_WAIT_SECONDS", "75"))
+
+STATE_DIR = Path.home() / ".hermes" / "profiles" / "qr_etl" / "var"
+FAIL_COUNT_STATE = STATE_DIR / "ibkr_watchdog_fail_count.state"
+CONTAINER_RESTART_STATE = STATE_DIR / "ibkr_watchdog_container_restart.state"
+
+# docker log lines that prove the gateway ended up LOGGED_OUT (IBC gives up after these)
+LOGGED_OUT_MARKERS = (
+    "Too many failed login attempts",
+    "LoginState is LOGGED_OUT",
+    "Login has not completed",
+    "Authorization failed",
+)
+LOGIN_OK_MARKER = "Login has completed"
+
 @dataclass
 class ProbeResult:
     ok: bool
@@ -123,12 +144,12 @@ def restart_tunnel() -> bool:
     return False
 
 
-def cooldown_elapsed(state_path: Path) -> bool:
+def cooldown_elapsed(state_path: Path, cooldown_seconds: int = RESTART_COOLDOWN_SECONDS) -> bool:
     if not state_path.exists():
         return True
     try:
         last = float(state_path.read_text().strip())
-        return time.time() - last >= RESTART_COOLDOWN_SECONDS
+        return time.time() - last >= cooldown_seconds
     except Exception:
         return True
 
@@ -136,6 +157,74 @@ def cooldown_elapsed(state_path: Path) -> bool:
 def touch_cooldown(state_path: Path):
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(str(time.time()))
+
+
+def read_fail_count() -> int:
+    try:
+        return int(FAIL_COUNT_STATE.read_text().strip())
+    except Exception:
+        return 0
+
+
+def write_fail_count(n: int):
+    FAIL_COUNT_STATE.parent.mkdir(parents=True, exist_ok=True)
+    FAIL_COUNT_STATE.write_text(str(n))
+
+
+def run_ssh(remote_cmd: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run a command on the gateway host. BatchMode: fail fast, never prompt."""
+    return subprocess.run(
+        [
+            "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            "-o", "ConnectTimeout=15", "-i", GATEWAY_KEY,
+            f"{GATEWAY_USER}@{GATEWAY_HOST}", remote_cmd,
+        ],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def gateway_login_state() -> str:
+    """
+    Classify the gateway's most recent login event from container logs.
+    Returns 'healthy' (last event was a completed login), 'logged_out'
+    (IBC gave up after a lockout/auth failure), or 'unknown'.
+    """
+    grep_pat = "|".join([LOGIN_OK_MARKER] + list(LOGGED_OUT_MARKERS))
+    try:
+        proc = run_ssh(
+            f"docker logs --since {GATEWAY_LOG_WINDOW} {GATEWAY_CONTAINER} 2>&1 "
+            f"| grep -E '{grep_pat}' | tail -1",
+            timeout=60,
+        )
+    except Exception as e:
+        logger.error("gateway_login_state ssh failed: %s", e)
+        return "unknown"
+    line = (proc.stdout or "").strip()
+    if proc.returncode != 0 and not line:
+        logger.error("gateway_login_state: no matching log lines (rc=%s)", proc.returncode)
+        return "unknown"
+    logger.info("gateway last login event: %s", line[-200:])
+    if LOGIN_OK_MARKER in line:
+        return "healthy"
+    if any(m in line for m in LOGGED_OUT_MARKERS):
+        return "logged_out"
+    return "unknown"
+
+
+def restart_gateway_container() -> bool:
+    """Restart the gateway container on the remote host and wait for IBC to log in."""
+    logger.warning("Restarting gateway container %s on %s", GATEWAY_CONTAINER, GATEWAY_HOST)
+    try:
+        proc = run_ssh(f"docker restart {GATEWAY_CONTAINER}", timeout=120)
+    except Exception as e:
+        logger.error("container restart ssh failed: %s", e)
+        return False
+    if proc.returncode != 0:
+        logger.error("container restart failed: %s", proc.stderr)
+        return False
+    logger.info("container restarted; waiting %ss for IBC login", CONTAINER_LOGIN_WAIT_SECONDS)
+    time.sleep(CONTAINER_LOGIN_WAIT_SECONDS)
+    return True
 
 
 async def probe_insync() -> ProbeResult:
@@ -166,6 +255,57 @@ async def probe_insync() -> ProbeResult:
             pass
         return ProbeResult(ok=False, stage="handshake", error=str(e))
 
+
+# Backend session recovery: the gateway probe only tests the tunnel path. The
+# backend's own TWS sessions (clientId 1 = main, 2 = UAT) drop on every gateway
+# nightly reset and only reconnect when someone hits the connect endpoint
+# (lazy reconnect in ib_service.py). Close that gap: when the gateway probe is
+# OK but a backend session reports disconnected, POST the connect endpoint.
+BACKEND_BASE_URL = os.environ.get("IBKR_BACKEND_BASE_URL", "http://127.0.0.1:8000")
+BACKEND_RECONNECT_COOLDOWN_SECONDS = int(os.environ.get("IBKR_WATCHDOG_BACKEND_RECONNECT_COOLDOWN_SECONDS", "300"))
+
+def _backend_reconnect_state(label: str) -> Path:
+    # Per-session cooldown: when BOTH sessions drop on a gateway reset, a single
+    # shared state file let main reconnect and then suppressed UAT for a full
+    # extra cooldown cycle (observed 2026-09-05: UAT down ~20 min every morning).
+    return STATE_DIR / f"ibkr_watchdog_backend_reconnect_{label}.state"
+
+def ensure_backend_sessions() -> str:
+    """Re-trigger backend /api/ib/tws{,/uat}/connect when a session is down."""
+    import json
+    import urllib.request
+
+    actions = []
+    for label, status_url, connect_url in (
+        ("main", f"{BACKEND_BASE_URL}/api/ib/tws/status", f"{BACKEND_BASE_URL}/api/ib/tws/connect"),
+        ("uat", f"{BACKEND_BASE_URL}/api/ib/tws/uat/status", f"{BACKEND_BASE_URL}/api/ib/tws/uat/connect"),
+    ):
+        state_path = _backend_reconnect_state(label)
+        try:
+            with urllib.request.urlopen(status_url, timeout=10) as resp:
+                status = json.loads(resp.read().decode())
+        except Exception as e:
+            logger.warning("backend %s status check failed: %s", label, e)
+            actions.append(f"{label}_status_unreachable")
+            continue
+        if status.get("is_connected"):
+            continue
+        if not cooldown_elapsed(state_path, BACKEND_RECONNECT_COOLDOWN_SECONDS):
+            logger.warning("backend %s disconnected but reconnect cooldown active", label)
+            actions.append(f"{label}_reconnect_cooldown")
+            continue
+        logger.warning("backend %s session disconnected; POST %s", label, connect_url)
+        try:
+            req = urllib.request.Request(connect_url, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = json.loads(resp.read().decode())
+            touch_cooldown(state_path)
+            logger.info("backend %s reconnect result: %s", label, body)
+            actions.append(f"reconnected_backend_{label}")
+        except Exception as e:
+            logger.error("backend %s reconnect failed: %s", label, e)
+            actions.append(f"reconnect_backend_{label}_failed")
+    return "+".join(actions) if actions else ""
 
 def log_to_postgres(result: ProbeResult, action_taken: str) -> None:
     if not PG_PASSWORD:
@@ -211,26 +351,64 @@ def log_to_postgres(result: ProbeResult, action_taken: str) -> None:
 
 
 def main() -> int:
-    state_path = Path.home() / ".hermes" / "profiles" / "qr_etl" / "var" / "ibkr_watchdog_restart.state"
+    tunnel_state = STATE_DIR / "ibkr_watchdog_restart.state"
     action_taken = "none"
 
     result = asyncio.run(probe_insync())
 
-    if not result.ok:
+    if result.ok:
+        write_fail_count(0)
+    else:
         logger.warning("Probe failed at stage %s: %s", result.stage, result.error)
-        if cooldown_elapsed(state_path):
+        fail_count = read_fail_count() + 1
+        write_fail_count(fail_count)
+        logger.warning("Consecutive probe failures: %s (threshold %s)", fail_count, FAIL_THRESHOLD)
+
+        # Step 1: tunnel restart (cheap, fixes local forwarding issues)
+        if cooldown_elapsed(tunnel_state):
             if restart_tunnel():
                 action_taken = "restarted_tunnel"
-                touch_cooldown(state_path)
+                touch_cooldown(tunnel_state)
                 result = asyncio.run(probe_insync())
+                if result.ok:
+                    write_fail_count(0)
             else:
                 action_taken = "tunnel_restart_failed"
         else:
-            logger.warning("Restart cooldown active; not restarting tunnel")
+            logger.warning("Tunnel restart cooldown active; not restarting tunnel")
             action_taken = "cooldown_active"
+
+        # Step 2: if the probe STILL fails after N consecutive runs, check whether the
+        # gateway itself is LOGGED_OUT (IBC never retries a lockout) and restart the
+        # container instead of the tunnel. Gated on remote log evidence + 1h cooldown
+        # so we never hammer IBKR login during their nightly reset window.
+        if not result.ok and fail_count >= FAIL_THRESHOLD:
+            if not cooldown_elapsed(CONTAINER_RESTART_STATE, CONTAINER_RESTART_COOLDOWN_SECONDS):
+                logger.warning("Container restart cooldown active; skipping gateway restart")
+                action_taken += "+container_cooldown_active"
+            else:
+                state = gateway_login_state()
+                if state == "logged_out":
+                    if restart_gateway_container():
+                        touch_cooldown(CONTAINER_RESTART_STATE)
+                        write_fail_count(0)
+                        action_taken = "restarted_gateway_container"
+                        result = asyncio.run(probe_insync())
+                    else:
+                        action_taken = "container_restart_failed"
+                elif state == "healthy":
+                    logger.error("Gateway is logged in but probe fails; not restarting container")
+                    action_taken += "+gateway_healthy_probe_fails"
+                else:
+                    logger.warning("Gateway login state unknown; not restarting container")
+                    action_taken += "+gateway_state_unknown"
 
     if result.ok:
         logger.info("Probe OK: stage=%s duration_ms=%.1f server_version=%s managed_accounts=%s", result.stage, result.duration_ms, result.server_version, result.managed_accounts)
+        # Gateway path is fine — make sure the backend's own sessions are too.
+        backend_actions = ensure_backend_sessions()
+        if backend_actions:
+            action_taken = f"{action_taken}+{backend_actions}" if action_taken != "none" else backend_actions
     else:
         logger.error("Probe still failing: stage=%s error=%s", result.stage, result.error)
 

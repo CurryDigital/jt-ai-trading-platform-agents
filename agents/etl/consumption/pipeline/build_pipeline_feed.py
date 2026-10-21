@@ -53,7 +53,16 @@ def fetch_pipeline_feed(cur) -> list:
             db_status,
             frequency,
             agent_source,
-            metric_valid_flag
+            metric_valid_flag,
+            current_year_wr,
+            is_paper_monitoring,
+            annual_pnl_2024,
+            annual_pnl_2025,
+            annual_pnl_2026,
+            live_pnl,
+            livewr_synthetic,
+            livepf_synthetic,
+            live_pnl_synthetic
         FROM gold.v_pipeline_ui_feed
         ORDER BY stage, updated_at DESC
     """)
@@ -81,16 +90,29 @@ def main():
     _VALID_HORIZON = {'day', 'swing', 'position'}
     _VALID_TIER = {'T1', 'T2', 'T3'}
     _VALID_STAGE = {'experimental', 'near_golden', 'golden', 'deployed'}
-    _BAD_STATUS = {'retired', 'paused', 'DEPRECATED'}
+    # Research-status gate.  Registry status is already gated by the view;
+    # do not block 'paused' here because SIMULATION strategies may legitimately
+    # be registry-paused while remaining visible research candidates.
+    _BAD_STATUS = {'retired', 'DEPRECATED'}
     _BAD_RESEARCH = {'rejected', 'retired'}
     _MIN_SHARPE = 0.5
     _MAX_DD = 0.20
     _MIN_TRADES = 30
     _MIN_RETURNS = None
     _TRADE_GATE_BYPASS = {'HK_Quality_BlueChips'}  # approved by operator despite 18 trades
+    # hk_ipo_day1_green_momentum_v1 removed from bypass 2026-09-15 — RETIRED
+    # (kanban t_fd837e85); retired status already filtered by _BAD_STATUS.
+    # 2026-09-17 (t_223e2519): hk_ipo_postlisting_drift_c1 bypass — audited
+    # event-driven EXPERIMENTAL paper-flat observer, 21 OOS trades < 30 gate;
+    # assigned_capital=0 by design (same observer class as hk_ipo_postlisting_drift_p2,
+    # which passes the gate on its own 31 trades).
+    _TRADE_GATE_BYPASS |= {'hk_ipo_postlisting_drift_c1'}
     for r in rows:
         # Metric sanity (numeric string vs null)
-        for k in ('btwr', 'btpf', 'returns', 'sharpe', 'dd'):
+        for k in ('btwr', 'btpf', 'returns', 'sharpe', 'dd',
+                  'current_year_wr', 'annual_pnl_2024', 'annual_pnl_2025',
+                  'annual_pnl_2026', 'live_pnl', 'livewr', 'livepf',
+                  'livewr_synthetic', 'livepf_synthetic', 'live_pnl_synthetic'):
             try:
                 r[k] = float(r[k]) if r[k] is not None else None
             except Exception:

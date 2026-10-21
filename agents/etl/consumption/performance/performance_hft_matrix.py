@@ -5,8 +5,9 @@ Reads from: gold.strategy_backtests, gold.strategy_definitions,
             gold.hft_metrics, gold.trade_executions,
             gold.strategy_metrics_summary
 Writes to:  consumption.performance_monthly_returns
-            consumption.performance_strategy_attribution
             consumption.hft_matrix
+            (does NOT write performance_strategy_attribution despite the legacy
+             docstring — single owner is portfolio_performance_attribution.py)
 """
 import sys, os
 sys.path.insert(0, 'shared/scripts')

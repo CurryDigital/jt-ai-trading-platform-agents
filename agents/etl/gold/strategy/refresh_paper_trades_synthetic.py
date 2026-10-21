@@ -126,26 +126,52 @@ def refresh():
         LEFT JOIN silver.unified_prices p ON p.ticker = sp.ticker AND p.date <= sp.next_signal_date
         WHERE sp.next_signal_date IS NOT NULL
         ORDER BY sp.strategy_id, sp.ticker, sp.next_signal_date, p.date DESC
+    ),
+    -- Lot sizing (DECISION 2026-08-17, t_928a4e7d,
+    -- docs/decisions/2026-08-17_lot_convention.md): US-listed equities/ETFs
+    -- size in WHOLE SHARES (lot = 1) — IBKR supports fractional US shares,
+    -- so 1 share is conservative-realistic and matches strategy slot math.
+    -- HK tickers use silver.asset_registry.lot_size when populated
+    -- (fallback 1 = no rounding until board lots are loaded); SG (.SI)
+    -- uses SGX board lot 100 (registry override when populated); futures
+    -- ('=' in ticker) are not lot-rounded. Positions that cannot afford
+    -- one lot are skipped.
+    sized AS (
+        SELECT
+            sp.strategy_id, sp.ticker, sp.signal_type, sp.entry_date, sp.next_signal_date,
+            sp.weight, sp.assigned_capital, ep.entry_price,
+            CASE
+                WHEN sp.ticker LIKE '%.HK' THEN COALESCE(NULLIF(ar.lot_size, 0), 1)
+                WHEN POSITION('=' IN sp.ticker) > 0 THEN 1
+                WHEN sp.ticker LIKE '%.SI' THEN COALESCE(NULLIF(ar.lot_size, 0), 100)
+                ELSE COALESCE(NULLIF(ar.lot_size, 0), 1)
+            END AS lot,
+            CASE WHEN ep.entry_price > 0 AND sp.weight IS NOT NULL AND sp.assigned_capital IS NOT NULL
+                 THEN (sp.weight * sp.assigned_capital) / ep.entry_price END AS raw_shares
+        FROM signal_pairs sp
+        JOIN entry_prices ep ON ep.strategy_id = sp.strategy_id AND ep.ticker = sp.ticker AND ep.entry_date = sp.entry_date
+        LEFT JOIN silver.asset_registry ar ON ar.ticker = sp.ticker
     )
     INSERT INTO gold.paper_trades_synthetic
         (strategy_id, ticker, direction, entry_date, exit_date, entry_price, exit_price, n_shares, pnl, pnl_pct, status, signal_weight, assigned_capital)
     SELECT
-        sp.strategy_id, sp.ticker,
-        CASE WHEN sp.signal_type = 'BUY' THEN 'long' ELSE 'short' END,
-        sp.entry_date, sp.next_signal_date, ep.entry_price, xp.exit_price,
-        CASE WHEN ep.entry_price > 0 AND sp.weight IS NOT NULL AND sp.assigned_capital IS NOT NULL
-             THEN (sp.weight * sp.assigned_capital) / ep.entry_price ELSE NULL END,
-        CASE WHEN ep.entry_price IS NOT NULL AND xp.exit_price IS NOT NULL AND sp.weight IS NOT NULL AND sp.assigned_capital IS NOT NULL
-             THEN (xp.exit_price - ep.entry_price) * ((sp.weight * sp.assigned_capital) / ep.entry_price)
-                  * CASE WHEN sp.signal_type = 'BUY' THEN 1 ELSE -1 END ELSE NULL END,
-        CASE WHEN ep.entry_price > 0 AND xp.exit_price IS NOT NULL
-             THEN ((xp.exit_price - ep.entry_price) / ep.entry_price) * 100
-                  * CASE WHEN sp.signal_type = 'BUY' THEN 1 ELSE -1 END ELSE NULL END,
-        'closed', sp.weight, sp.assigned_capital
-    FROM signal_pairs sp
-    LEFT JOIN entry_prices ep ON ep.strategy_id = sp.strategy_id AND ep.ticker = sp.ticker AND ep.entry_date = sp.entry_date
-    LEFT JOIN exit_prices xp ON xp.strategy_id = sp.strategy_id AND xp.ticker = sp.ticker AND xp.exit_date = sp.next_signal_date
-    WHERE ep.entry_price IS NOT NULL AND xp.exit_price IS NOT NULL
+        s.strategy_id, s.ticker,
+        CASE WHEN s.signal_type = 'BUY' THEN 'long' ELSE 'short' END,
+        s.entry_date, s.next_signal_date, s.entry_price, xp.exit_price,
+        FLOOR(s.raw_shares / s.lot) * s.lot,
+        (xp.exit_price - s.entry_price) * (FLOOR(s.raw_shares / s.lot) * s.lot)
+             * CASE WHEN s.signal_type = 'BUY' THEN 1 ELSE -1 END,
+        ((xp.exit_price - s.entry_price) / s.entry_price) * 100
+             * CASE WHEN s.signal_type = 'BUY' THEN 1 ELSE -1 END,
+        'closed', s.weight, s.assigned_capital
+    FROM sized s
+    JOIN exit_prices xp ON xp.strategy_id = s.strategy_id AND xp.ticker = s.ticker AND xp.exit_date = s.next_signal_date
+    WHERE s.raw_shares IS NOT NULL
+      AND FLOOR(s.raw_shares / s.lot) * s.lot > 0
+      -- t_8b58b2bc: never write same-day closed rows. entry=exit at the same
+      -- close yields $0 PnL artifacts that corrupt WR/PF (memo 2026-08-17
+      -- section 2.3). A signal paired with itself on one date is not a trade.
+      AND s.next_signal_date > s.entry_date
     """)
 
     # Open trades: the latest unclosed signal per (strategy, ticker).
@@ -187,27 +213,44 @@ def refresh():
             SELECT DISTINCT ON (ticker) ticker, date AS price_date, close AS latest_price
             FROM silver.unified_prices WHERE close IS NOT NULL ORDER BY ticker, date DESC
         ) real_prices
+    ),
+    -- Lot sizing: same convention as the closed-trade insert above
+    -- (DECISION 2026-08-17, t_928a4e7d).
+    sized AS (
+        SELECT
+            ls.strategy_id, ls.ticker, ls.signal_type, ls.entry_date, ls.weight,
+            sc.assigned_capital, ep.entry_price,
+            CASE
+                WHEN ls.ticker LIKE '%.HK' THEN COALESCE(NULLIF(ar.lot_size, 0), 1)
+                WHEN POSITION('=' IN ls.ticker) > 0 THEN 1
+                WHEN ls.ticker LIKE '%.SI' THEN COALESCE(NULLIF(ar.lot_size, 0), 100)
+                ELSE COALESCE(NULLIF(ar.lot_size, 0), 1)
+            END AS lot,
+            CASE WHEN ep.entry_price > 0 AND ls.weight IS NOT NULL AND sc.assigned_capital IS NOT NULL
+                 THEN (ls.weight * sc.assigned_capital) / ep.entry_price END AS raw_shares
+        FROM last_signals ls
+        JOIN strategy_capital sc ON sc.strategy_id = ls.strategy_id
+        JOIN entry_prices ep ON ep.strategy_id = ls.strategy_id AND ep.ticker = ls.ticker AND ep.entry_date = ls.entry_date
+        LEFT JOIN silver.asset_registry ar ON ar.ticker = ls.ticker
     )
     INSERT INTO gold.paper_trades_synthetic
         (strategy_id, ticker, direction, entry_date, exit_date, entry_price, exit_price, n_shares, pnl, pnl_pct, status, signal_weight, assigned_capital)
     SELECT
-        ls.strategy_id, ls.ticker,
-        CASE WHEN ls.signal_type = 'BUY' THEN 'long' ELSE 'short' END,
-        ls.entry_date, lp.price_date, ep.entry_price, lp.latest_price,
-        CASE WHEN ep.entry_price > 0 AND ls.weight IS NOT NULL AND sc.assigned_capital IS NOT NULL
-             THEN (ls.weight * sc.assigned_capital) / ep.entry_price ELSE NULL END,
-        CASE WHEN ep.entry_price IS NOT NULL AND lp.latest_price IS NOT NULL AND ls.weight IS NOT NULL AND sc.assigned_capital IS NOT NULL
-             THEN (lp.latest_price - ep.entry_price) * ((ls.weight * sc.assigned_capital) / ep.entry_price)
-                  * CASE WHEN ls.signal_type = 'BUY' THEN 1 ELSE -1 END ELSE NULL END,
-        CASE WHEN ep.entry_price > 0 AND lp.latest_price IS NOT NULL
-             THEN ((lp.latest_price - ep.entry_price) / ep.entry_price) * 100
-                  * CASE WHEN ls.signal_type = 'BUY' THEN 1 ELSE -1 END ELSE NULL END,
-        'open', ls.weight, sc.assigned_capital
-    FROM last_signals ls
-    JOIN strategy_capital sc ON sc.strategy_id = ls.strategy_id
-    LEFT JOIN entry_prices ep ON ep.strategy_id = ls.strategy_id AND ep.ticker = ls.ticker AND ep.entry_date = ls.entry_date
-    LEFT JOIN latest_prices lp ON lp.ticker = ls.ticker
-    WHERE ep.entry_price IS NOT NULL
+        s.strategy_id, s.ticker,
+        CASE WHEN s.signal_type = 'BUY' THEN 'long' ELSE 'short' END,
+        s.entry_date, lp.price_date, s.entry_price, lp.latest_price,
+        FLOOR(s.raw_shares / s.lot) * s.lot,
+        CASE WHEN lp.latest_price IS NOT NULL
+             THEN (lp.latest_price - s.entry_price) * (FLOOR(s.raw_shares / s.lot) * s.lot)
+                  * CASE WHEN s.signal_type = 'BUY' THEN 1 ELSE -1 END ELSE NULL END,
+        CASE WHEN lp.latest_price IS NOT NULL
+             THEN ((lp.latest_price - s.entry_price) / s.entry_price) * 100
+                  * CASE WHEN s.signal_type = 'BUY' THEN 1 ELSE -1 END ELSE NULL END,
+        'open', s.weight, s.assigned_capital
+    FROM sized s
+    LEFT JOIN latest_prices lp ON lp.ticker = s.ticker
+    WHERE s.raw_shares IS NOT NULL
+      AND FLOOR(s.raw_shares / s.lot) * s.lot > 0
     """)
 
     conn.commit()

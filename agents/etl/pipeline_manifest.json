@@ -55,11 +55,56 @@
       "enabled": true
     },
     {
-      "name": "YF prices",
+      "name": "YF prices (US)",
+      "script": "bronze/yfinance/ingest_yfinance_prices.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true,
+      "args": ["--markets", "US"]
+    },
+    {
+      "name": "YF prices (HK)",
+      "script": "bronze/yfinance/ingest_yfinance_prices.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true,
+      "args": ["--markets", "HK"]
+    },
+    {
+      "name": "YF prices (CN,SG)",
+      "script": "bronze/yfinance/ingest_yfinance_prices.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true,
+      "args": ["--markets", "CN,SG"]
+    },
+    {
+      "name": "YF prices (FX,CRYPTO,GLOBAL,INDEX)",
       "script": "bronze/yfinance/ingest_yfinance_prices.py",
       "stage": "bronze",
       "cadence": "daily",
       "timeout": 120,
+      "enabled": true,
+      "args": ["--markets", "FX,CRYPTO,GLOBAL,INDEX"]
+    },
+    {
+      "name": "YF commodity futures",
+      "script": "bronze/yfinance/ingest_yfinance_prices.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true,
+      "args": ["--futures-only"]
+    },
+    {
+      "name": "CFTC COT (GC/CL/ES/EURO FX)",
+      "script": "bronze/cftc/ingest_cot.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 300,
       "enabled": true
     },
     {
@@ -68,6 +113,22 @@
       "stage": "bronze",
       "cadence": "weekly",
       "timeout": 1800,
+      "enabled": true
+    },
+    {
+      "name": "Coinbase crypto (binance fallback)",
+      "script": "bronze/coinbase/ingest_coinbase.py",
+      "stage": "bronze",
+      "cadence": "weekly",
+      "timeout": 300,
+      "enabled": true
+    },
+    {
+      "name": "IBKR historical bars",
+      "script": "bronze/ibkr/ingest_historical.py",
+      "stage": "bronze",
+      "cadence": "daily",
+      "timeout": 600,
       "enabled": true
     },
     {
@@ -127,6 +188,14 @@
       "enabled": true
     },
     {
+      "name": "FX pair aliases",
+      "script": "silver/alias_fx_pairs.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
       "name": "Unified earnings",
       "script": "silver/clean_unified_earnings.py",
       "stage": "silver",
@@ -151,6 +220,14 @@
       "enabled": true
     },
     {
+      "name": "Funding rates daily",
+      "script": "bronze/binance/ingest_funding_rates.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 300,
+      "enabled": true
+    },
+    {
       "name": "IBKR promote",
       "script": "silver/promote_ibkr.py",
       "stage": "silver",
@@ -164,6 +241,54 @@
       "stage": "silver",
       "cadence": "daily",
       "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "HK IPO calendar daily refresh (AAStocks oversub + new listings)",
+      "script": "silver/refresh_ipo_calendar_daily.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 300,
+      "enabled": true
+    },
+    {
+      "name": "HK IPO upcoming/subscription-window refresh (AAStocks offer period + listing calendar)",
+      "script": "silver/refresh_ipo_upcoming_daily.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 300,
+      "enabled": true
+    },
+    {
+      "name": "HK IPO pre-subscription filings refresh (HKEXnews A1/PHIP appindex)",
+      "script": "silver/refresh_ipo_filings_daily.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 300,
+      "enabled": true
+    },
+    {
+      "name": "HK IPO allotment results refresh (HKEXnews one-lot win rate + tier tables, listing-12d..+3d window)",
+      "script": "silver/refresh_ipo_allotment_daily.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 300,
+      "enabled": true
+    },
+    {
+      "name": "HK IPO performance build (first-day + day10/20/30/90 returns; feeds gold IPO step)",
+      "script": "silver/build_ipo_performance.py",
+      "stage": "silver",
+      "cadence": "daily",
+      "timeout": 600,
+      "enabled": true
+    },
+    {
+      "name": "Gold core build (daily_ohlcv, vix_regime, macro_flags, funding, cot, regime)",
+      "script": "gold/gold_builder.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 600,
       "enabled": true
     },
     {
@@ -220,6 +345,14 @@
       "stage": "gold",
       "cadence": "daily",
       "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "COT sentiment",
+      "script": "gold/build_cot_sentiment.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 120,
       "enabled": true
     },
     {
@@ -343,6 +476,14 @@
       "enabled": true
     },
     {
+      "name": "IPO announced placeholders (A1/PHIP filings -> gold.hk_ipo_calendar)",
+      "script": "gold/ipo/build_ipo_announced.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 180,
+      "enabled": true
+    },
+    {
       "name": "Attention items",
       "script": "gold/strategy/build_attention_items.py",
       "stage": "gold",
@@ -356,6 +497,22 @@
       "stage": "gold",
       "cadence": "daily",
       "timeout": 180,
+      "enabled": true
+    },
+    {
+      "name": "Refresh synthetic paper trades",
+      "script": "gold/strategy/refresh_paper_trades_synthetic.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 600,
+      "enabled": true
+    },
+    {
+      "name": "Paper kill-switch monitor (R3: live DD > 1.5x audited MDD -> RE_AUDIT task)",
+      "script": "gold/strategy/paper_kill_switch_monitor.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 300,
       "enabled": true
     },
     {
@@ -375,6 +532,14 @@
       "enabled": true
     },
     {
+      "name": "PAPER_UAT mirror sync (hard-fails when UAT session disconnected)",
+      "script": "sync_paper_uat_to_gold.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 60,
+      "enabled": true
+    },
+    {
       "name": "Market overview",
       "script": "consumption/market/market_overview.py",
       "stage": "consumption",
@@ -385,6 +550,14 @@
     {
       "name": "Command: account summary",
       "script": "consumption/command/build_account_summary.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Command: account cash flows",
+      "script": "consumption/command/build_account_cash_flows.py",
       "stage": "consumption",
       "cadence": "daily",
       "timeout": 30,
@@ -419,7 +592,7 @@
       "script": "consumption/lab/lab_research_signals.py",
       "stage": "consumption",
       "cadence": "daily",
-      "timeout": 30,
+      "timeout": 120,
       "enabled": true
     },
     {
@@ -444,6 +617,22 @@
       "stage": "consumption",
       "cadence": "daily",
       "timeout": 30,
+      "enabled": true
+    },
+    {
+      "name": "Strategy backtest monthly returns (gold, verified research curves)",
+      "script": "gold/strategy/refresh_strategy_monthly_returns_gold.py",
+      "stage": "gold",
+      "cadence": "daily",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "Performance: strategy monthly returns view",
+      "script": "consumption/performance/refresh_strategy_monthly_returns.py",
+      "stage": "consumption",
+      "cadence": "daily",
+      "timeout": 60,
       "enabled": true
     },
     {
@@ -516,6 +705,14 @@
     {
       "name": "Unified prices (hourly)",
       "script": "silver/clean_unified_prices.py",
+      "stage": "silver",
+      "cadence": "hourly",
+      "timeout": 120,
+      "enabled": true
+    },
+    {
+      "name": "FX pair aliases (hourly)",
+      "script": "silver/alias_fx_pairs.py",
       "stage": "silver",
       "cadence": "hourly",
       "timeout": 120,

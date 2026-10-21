@@ -48,17 +48,21 @@ fi
 set -a && source "${ENV_FILE}" && set +a
 echo "Loaded env from ${ENV_FILE}"
 
-PYTHON="/home/ubuntu/.hermes/hermes-agent/venv/bin/python3"
+# 2026-08-20: use the ETL venv (same as daily_refresh.sh) — it carries
+# yfinance + lxml, which the weekly yfinance_aux step requires. The Hermes
+# app venv does NOT have yfinance; the weekly run failed there with
+# "yfinance not installed" once it was finally cron-wired.
+PYTHON="/home/ubuntu/.hermes/etl-venv/bin/python3"
 if [ ! -f "${PYTHON}" ]; then
-    echo "FATAL: Hermes venv Python not found at ${PYTHON}"
+    echo "FATAL: ETL venv Python not found at ${PYTHON}"
     exit 65
 fi
 if ! "${PYTHON}" -c "import psycopg2, dotenv" 2>/dev/null; then
-    echo "FATAL: Hermes venv missing psycopg2 or python-dotenv."
-    echo "  Run: bash ${WORKSPACE}/../../bootstrap_hermes_venv.sh"
+    echo "FATAL: ETL venv missing psycopg2 or python-dotenv."
+    echo "  ${PYTHON} cannot import psycopg2 / dotenv."
     exit 70
 fi
-echo "✅ Hermes venv check: psycopg2 + dotenv importable"
+echo "✅ ETL venv check: psycopg2 + dotenv importable"
 
 cd "${WORKSPACE}"
 

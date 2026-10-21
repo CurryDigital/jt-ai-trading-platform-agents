@@ -7,8 +7,18 @@
 #!/usr/bin/env python3
 """
 Gold FX: FX Metrics
-Reads from: bronze.fx_prices, bronze.ibkr_fx_bars
+Reads from: silver.unified_prices (non-suffixed FX alias tickers, yfinance-sourced)
 Writes to:  gold.fx_metrics
+
+2026-08-06 (kanban t_aa97c50d): rewired off bronze.fx_prices / bronze.ibkr_fx_bars.
+IBKR FX historical ingest is permanently disabled (paper account lacks the FX
+data subscription), so the bronze source froze at 2026-06-17 and gold.fx_metrics
+went stale. silver.unified_prices now carries fresh daily alias rows
+(silver/alias_fx_pairs.py derives EURUSD etc. from the yfinance '=X' series).
+Source tickers are DB-discovered the same way as the alias step: 6-letter silver
+tickers whose '<ticker>=X' form is an active FX/CURRENCY row in
+gold.asset_registry. silver daily rows carry OHLC directly; yfinance '=X'
+volume is 0/NULL but gold.fx_metrics has no volume-dependent logic.
 
 Computes SMA/Bollinger/volatility/regime in SQL, then fills the true
 technical indicators (Wilder RSI-14, EMA-based MACD line/signal/histogram,
@@ -19,6 +29,10 @@ atr_14 as NULL and macd_line as AVG(12)-AVG(26) (an SMA difference, not an EMA
 MACD). That is the same bug class that killed the silver MACD. The indicators
 are now computed in Python via indicators.py — the single source of truth — so
 silver, FX and index agree. Never fabricated: NULL where history is too short.
+
+Lookback: stage 1 upserts the last FX_LOOKBACK_DAYS days (default 14,
+incremental). Set FX_LOOKBACK_DAYS higher for one-off backfills; stage 2
+recomputes indicators over its own warmup window and writes the tail.
 """
 import sys, os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +42,8 @@ sys.path.insert(0, 'shared/scripts')  # legacy CWD-relative bootstrap
 os.environ.setdefault('AWS_REGION', 'ap-southeast-1')
 from db import get_connection
 from price_indicators import indicator_rows, WARMUP_CALENDAR_DAYS, WRITE_TAIL_DAYS
+
+LOOKBACK_DAYS = int(os.environ.get('FX_LOOKBACK_DAYS', '14'))
 
 SQL = """
 INSERT INTO gold.fx_metrics
@@ -41,22 +57,25 @@ INSERT INTO gold.fx_metrics
    atr_14, volatility_20d,
    market_regime)
 
-WITH daily AS (
-  SELECT
-    pair AS ticker,
-    DATE(timestamp AT TIME ZONE 'UTC') AS date,
-    FIRST_VALUE(open)  OVER (PARTITION BY pair, DATE(timestamp AT TIME ZONE 'UTC') ORDER BY timestamp) AS open,
-    MAX(high)  OVER (PARTITION BY pair, DATE(timestamp AT TIME ZONE 'UTC')) AS high,
-    MIN(low)   OVER (PARTITION BY pair, DATE(timestamp AT TIME ZONE 'UTC')) AS low,
-    LAST_VALUE(close)  OVER (PARTITION BY pair, DATE(timestamp AT TIME ZONE 'UTC')
-                              ORDER BY timestamp
-                              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS close
-  FROM bronze.fx_prices
-  WHERE timestamp >= CURRENT_DATE - INTERVAL '14 days'
+WITH fx_tickers AS (
+  -- Non-suffixed FX alias tickers maintained by silver/alias_fx_pairs.py:
+  -- 6-letter silver tickers whose '=X' form is an active FX/CURRENCY registry row.
+  SELECT DISTINCT up.ticker
+  FROM silver.unified_prices up
+  JOIN gold.asset_registry ar
+    ON ar.ticker = up.ticker || '=X'
+   AND ar.is_active = TRUE
+   AND ar.asset_class IN ('FX', 'CURRENCY')
+  WHERE up.ticker ~ '^[A-Z]{{6}}$'
 ),
 deduped AS (
-  SELECT DISTINCT ON (ticker, date) *
-  FROM daily ORDER BY ticker, date
+  SELECT
+    up.ticker,
+    up.date::timestamp AS date,
+    up.open, up.high, up.low, up.close
+  FROM silver.unified_prices up
+  JOIN fx_tickers f ON f.ticker = up.ticker
+  WHERE up.date >= CURRENT_DATE - (INTERVAL '1 day' * {lookback})
 ),
 returns_calc AS (
   -- First compute log returns without nesting window functions
@@ -164,8 +183,8 @@ def fill_indicators(conn):
 def run():
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute(SQL)
-    print(f"✅ gold.fx_metrics updated: {cur.rowcount} rows upserted")
+    cur.execute(SQL.format(lookback=LOOKBACK_DAYS))
+    print(f"✅ gold.fx_metrics updated: {cur.rowcount} rows upserted (lookback={LOOKBACK_DAYS}d)")
     fill_indicators(conn)
     conn.commit()
     conn.close()

@@ -6,6 +6,15 @@ Reads from: gold.strategy_backtests, gold.strategy_definitions,
 Writes to:  consumption.strategies_backtest_results
             consumption.strategy_scores_dynamic
             consumption.ticker_scores
+
+Evidence contract (2026-10-09, t_835ba3c4): RETRACTED gold.strategy_backtests
+rows are quarantined and never fed; evidence_class/verification_note are
+carried into consumption so UNVERIFIED_NON_PIT rows can be badged and excluded
+from rankings. Gold-sourced rows are DELETE-then-INSERT per refresh (the
+historical ON CONFLICT (id) never fired — id is serial — causing duplicates).
+FLAG: legacy signal-agent position_size uses hardcoded price=100.0/atr14=2.0
+(BaseStrategy.run stub) — NO P&L may ever be derived from gold.strategy_signals
+or gold.regime_gate_decision_log; shadow-PnL proposals must be rejected.
 """
 import sys, os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,12 +25,19 @@ from db import get_connection
 
 # ── Backtest Results ──────────────────────────────────────────────────────────
 
+BACKTEST_DELETE_SQL = """
+-- Re-sync the gold-sourced slice (see migration
+-- 2026-10-09_strategy_backtests_evidence_quarantine.sql).
+DELETE FROM consumption.strategies_backtest_results
+WHERE strategy_id IN (SELECT strategy_id::text FROM gold.strategy_backtests);
+"""
+
 BACKTEST_SQL = """
 INSERT INTO consumption.strategies_backtest_results
     (strategy_id, asset_class,
      sharpe_ratio, max_drawdown_pct, total_trades, win_rate,
      sharpe_oos, returns_oos, max_drawdown_oos, trade_count_oos, win_rate_oos,
-     updated_at)
+     updated_at, evidence_class, verification_note)
 SELECT
     sb.strategy_id::text,
     NULL AS asset_class,
@@ -34,14 +50,19 @@ SELECT
     NULL AS max_drawdown_oos,
     NULL AS trade_count_oos,
     NULL AS win_rate_oos,
-    sb.run_date AS updated_at
+    sb.run_date AS updated_at,
+    sb.evidence_class,
+    sb.verification_note
 FROM gold.strategy_backtests sb
+WHERE sb.evidence_class IS DISTINCT FROM 'RETRACTED'  -- quarantined rows never surface (t_835ba3c4)
 ON CONFLICT (id) DO UPDATE SET
     sharpe_ratio        = EXCLUDED.sharpe_ratio,
     max_drawdown_pct    = EXCLUDED.max_drawdown_pct,
     win_rate            = EXCLUDED.win_rate,
     total_trades        = EXCLUDED.total_trades,
-    updated_at          = EXCLUDED.updated_at;
+    updated_at          = EXCLUDED.updated_at,
+    evidence_class      = EXCLUDED.evidence_class,
+    verification_note   = EXCLUDED.verification_note;
 """
 
 # ── Dynamic Scores ────────────────────────────────────────────────────────────
@@ -105,6 +126,8 @@ def run():
         conn.close()
         return
 
+    cur.execute(BACKTEST_DELETE_SQL)
+    print(f"🧹 consumption.strategies_backtest_results — {cur.rowcount} stale gold-sourced rows removed")
     cur.execute(BACKTEST_SQL)
     print(f"✅ consumption.strategies_backtest_results — {cur.rowcount} rows upserted")
 
