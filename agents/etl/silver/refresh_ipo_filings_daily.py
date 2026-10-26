@@ -110,6 +110,67 @@ def doc_dates(entry, needle):
     return out
 
 
+def fill_calendar_board(cur):
+    """Backfill silver.unified_ipo_calendar.board (kanban t_33748a1d).
+
+    Root cause fixed here: the AAStocks calendar ingest never writes board,
+    so every listing first seen after the 2026-08-30 NLR backfill era got
+    board=NULL, silently excluding Main-board events from the C1 engine
+    (board='Main' filter) and forcing the paper feeder onto a ticker-prefix
+    fallback -> feeder/engine event-set divergence.
+
+    Fill hierarchy:
+      1. silver.hk_ipo_filings.listed_stock_code (HKEXnews applisted feed
+         reconciliation, authoritative; filings board 'MAIN' maps to the
+         calendar's 'Main' casing, 'GEM' stays 'GEM').
+      2. HKEX code-range convention (08001-08999 = GEM, else Main) for rows
+         the applisted feed has not caught up with yet (feed lags up to ~2
+         weeks around listing). Verified 2026-10-26: 0/1550 labeled rows
+         conflict with the code-range rule. Provenance-tagged so audits can
+         distinguish derived rows.
+
+    Fill-NULL only; never overwrites an existing board value.
+    Returns (n_from_filings, n_from_code_range).
+    """
+    cur.execute(
+        """
+        UPDATE silver.unified_ipo_calendar c
+        SET board = CASE WHEN f.board = 'MAIN' THEN 'Main' ELSE f.board END,
+            data_source = COALESCE(c.data_source, '') || '+hkex_filings_board',
+            updated_at = NOW()
+        FROM silver.hk_ipo_filings f
+        WHERE c.board IS NULL
+          AND f.status = 'listed'
+          AND f.listed_stock_code = lpad(split_part(c.ticker, '.', 1), 5, '0')
+        """)
+    n_filings = cur.rowcount
+    cur.execute(
+        """
+        UPDATE silver.unified_ipo_calendar
+        SET board = CASE WHEN split_part(ticker, '.', 1) LIKE '8%'
+                         THEN 'GEM' ELSE 'Main' END,
+            data_source = COALESCE(data_source, '') || '+hkex_code_range_board',
+            updated_at = NOW()
+        WHERE board IS NULL
+          AND ticker ~ '^[0-9]{4,5}\\.HK$'
+        """)
+    n_range = cur.rowcount
+    return n_filings, n_range
+
+
+def board_qa_gate(cur):
+    """QA gate (kanban t_33748a1d): NULL board on a listed IPO
+    (listing_date <= today) is an INGEST FAILURE, not a silent pass.
+    Returns list of offending (ticker, listing_date); empty = pass."""
+    cur.execute(
+        """
+        SELECT ticker, listing_date FROM silver.unified_ipo_calendar
+        WHERE board IS NULL AND listing_date <= CURRENT_DATE
+        ORDER BY listing_date
+        """)
+    return cur.fetchall()
+
+
 def main():
     conn = get_connection()
     cur = conn.cursor()
@@ -219,6 +280,11 @@ def main():
                 (board, app_id))
             n_lapsed += 1
 
+    # 6b. Board backfill onto the calendar + QA gate (t_33748a1d): a listed
+    #     IPO with NULL board is an ingest failure, not a silent pass.
+    n_bf_filings, n_bf_range = fill_calendar_board(cur)
+    gate_failures = board_qa_gate(cur)
+
     # 7. Freshness stamp.
     from freshness import mark_source_refreshed
     mark_source_refreshed(
@@ -230,8 +296,15 @@ def main():
     print(f"✅ silver.hk_ipo_filings: {upserted} active upserted across "
           f"{len(ACTIVE_FEEDS)} feeds, "
           f"{n_listed} newly listed, {n_lapsed} newly lapsed")
+    print(f"   calendar board backfilled: {n_bf_filings} from filings, "
+          f"{n_bf_range} from code range")
     per_feed = {f: len(p['app']) for f, p in payloads.items()}
     print(f"   feed sizes: {per_feed}")
+    if gate_failures:
+        tickers = ', '.join(f"{t}({d})" for t, d in gate_failures)
+        print(f"FATAL: board QA gate — {len(gate_failures)} listed IPO(s) "
+              f"with NULL board: {tickers}")
+        sys.exit(1)
     cur.close()
     conn.close()
 
