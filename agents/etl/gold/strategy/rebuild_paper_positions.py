@@ -12,6 +12,9 @@ Writes:
 - gold.paper_trades_synthetic (open positions, no more than one open row per ticker per strategy)
 - gold.paper_trade_skip_log (append-only audit of zero-size BUY skips)
 - consumption.strategy_paper_skips_current (current skip state per strategy/ticker, for the UI)
+- consumption.strategy_paper_deployment_current (per-run deployment ratio:
+  committed notional / deployable target, so whole-lot + concentration-cap
+  quantization cash drag is visible per book; t_33ffe715)
 
 Behaviour:
 - One open position per (strategy_id, ticker).
@@ -40,6 +43,21 @@ Cadence gate (2026-08-17, t_68b07c59):
 - On gated (non-rebalance) days, new BUY targets that would have opened are
   surfaced as CADENCE_GATE skips; held positions are never touched.
 - --force-rebalance and --backfill bypass the gate (ops escape hatches).
+
+Rank-bounded rotation screen (2026-11-02, t_fdc57b21):
+- gold.strategy_configs config_key='rotation_top_n' (integer >= 1) declares
+  a FIXED top-N screen for a strategy ("exited when they leave the
+  screen"). When the score table publishes more than N BUY rows, only the
+  N highest-scored BUYs (ties: ticker asc) form the effective book: held
+  laggards ranked outside the screen exit at the rebalance boundary
+  (releasing their cost basis for the higher-ranked entries) and non-held
+  out-of-screen BUYs surface as ROTATION_TRIM skips. Without it a
+  fully-deployed BUY-only book whose held names keep ANY BUY row can never
+  rotate: the delta clamp counts the whole book as retained cost and every
+  new entry walls on OVER_DEPLOYED (SUE 2026-11: 56 BUYs vs 20-slot
+  design, 0 closes, period consumed with zero rotation).
+- Absent config = legacy behaviour, unchanged. Signal publication and the
+  cadence gate are unaffected; gated days emit no ROTATION_TRIM rows.
 
 Delta-mode deployment clamp (2026-09-18, t_5f69e8c0):
 - Delta mode preserves existing position sizes, so NEW entries are sized
@@ -119,6 +137,12 @@ Fill-price convention (2026-08-17, kanban t_3454cc76):
   = 'SIGNAL_CLOSE' fills immediately at the signal-date close with
   entry_date = signal bar date (honest stamping for strategies that declare
   close-of-signal-date fills).
+- Declared convention (t_716fe5a7): gold.strategy_registry
+  .entry_fill_convention is the authoritative per-book declaration
+  (NEXT_OPEN for the nine reinstated books; SIGNAL_CLOSE is not declarable
+  under the no-lookahead standard). Resolution: registry declaration >
+  strategy_configs override > NEXT_OPEN default; a declared value the
+  engine cannot execute fails closed.
 - The ledger exposes the basis of every fill: entry_price_source_date /
   entry_price_basis and exit_price_source_date / exit_price_basis on
   gold.paper_trades_synthetic. consumption.strategy_paper_pending_current
@@ -169,19 +193,36 @@ WHERE status = 'open';
 
 SQL_FETCH_ACTIVE_STRATEGIES = """
 SELECT
-  strategy_id,
-  name,
-  execution_mode,
-  assigned_capital,
-  universe_tickers,
-  frequency
-FROM gold.strategy_registry
-WHERE retired_at IS NULL
-  AND execution_mode IN ('PAPER', 'SIMULATION', 'PAPER_UAT')
-  AND COALESCE(disable_paper_rebuild, FALSE) = FALSE
-  AND universe_tickers IS NOT NULL
-  AND array_length(universe_tickers, 1) > 0
-ORDER BY strategy_id;
+  r.strategy_id,
+  r.name,
+  r.execution_mode,
+  r.assigned_capital,
+  r.universe_tickers,
+  r.frequency
+FROM gold.strategy_registry r
+WHERE (
+    r.retired_at IS NULL
+    AND r.status <> 'retired'  -- hygiene: status='retired' with retired_at NULL
+                               -- must not re-enter the active set (nfp_equity_drift_long
+                               -- tripped the SIGNAL_STALE guard 2026-11-02)
+    AND r.execution_mode IN ('PAPER', 'SIMULATION', 'PAPER_UAT')
+    AND COALESCE(r.disable_paper_rebuild, FALSE) = FALSE
+    AND r.universe_tickers IS NOT NULL
+    AND array_length(r.universe_tickers, 1) > 0
+  )
+  OR (
+    -- MANAGED RUNOFF (t_0daa8eaf): retired PAPER book with open legs or
+    -- resting orders stays in the rebuild set so legs are managed to
+    -- rule-consistent exits. Self-terminating once flat.
+    r.retired_at IS NOT NULL
+    AND r.execution_mode = 'PAPER'
+    AND COALESCE(r.disable_paper_rebuild, FALSE) = FALSE
+    AND (EXISTS (SELECT 1 FROM gold.paper_trades_synthetic p
+                 WHERE p.strategy_id = r.strategy_id AND p.status = 'open')
+         OR EXISTS (SELECT 1 FROM gold.paper_pending_orders o
+                    WHERE o.strategy_id = r.strategy_id AND o.status = 'pending'))
+  )
+ORDER BY r.strategy_id;
 """
 
 SQL_FETCH_LATEST_SCORES = """
@@ -245,6 +286,22 @@ WHERE strategy_id = ANY(%s)
   AND config_key = 'fill_convention';
 """
 
+SQL_FETCH_ROTATION_TOP_N = """
+SELECT strategy_id, config_value
+FROM gold.strategy_configs
+WHERE strategy_id = ANY(%s)
+  AND config_key = 'rotation_top_n';
+"""
+
+# Declared per-book entry fill convention (t_716fe5a7): the authoritative
+# declaration lives on the registry row, not in a configs override.
+SQL_FETCH_REGISTRY_CONVENTIONS = """
+SELECT strategy_id, entry_fill_convention
+FROM gold.strategy_registry
+WHERE strategy_id = ANY(%s)
+  AND entry_fill_convention IS NOT NULL;
+"""
+
 # ── Cadence gate state (t_68b07c59) ─────────────────────────────────────
 # One row per cadence-gated strategy (weekly/monthly). last_period_key is
 # the period of the most recent EXECUTED rebalance; compared against the
@@ -289,6 +346,12 @@ SQL_TRUNCATE_STALE = """
 TRUNCATE TABLE gold.paper_trades_synthetic, consumption.strategies_signals_current;
 """
 
+# t_f81b2bb2: close charges the strategy's DECLARED cost model (config
+# gold.strategy_configs config_key='cost_bps') on the exit leg and restates
+# pnl net of BOTH legs' costs: pnl = gross - entry_cost - exit_cost.
+# %s params: exit_date, exit_price, source_date, basis,
+#   exit_price(ec), bps(ec), bps(applied), exit_price(gross),
+#   exit_price(ec), bps(ec), exit_price(gross), exit_price(ec), bps(ec), ids
 SQL_CLOSE_POSITIONS = """
 UPDATE gold.paper_trades_synthetic
 SET status = 'closed',
@@ -296,19 +359,29 @@ SET status = 'closed',
     exit_price = %s,
     exit_price_source_date = %s,
     exit_price_basis = %s,
-    pnl = (%s - entry_price) * n_shares,
+    exit_cost = ROUND(%s * n_shares * %s / 10000.0, 6),
+    cost_bps_applied = %s,
+    pnl = (%s - entry_price) * n_shares
+          - COALESCE(entry_cost, 0)
+          - ROUND(%s * n_shares * %s / 10000.0, 6),
     pnl_pct = CASE WHEN entry_price = 0 OR entry_price IS NULL THEN 0
-                   ELSE ((%s - entry_price) / entry_price) * 100 END,
+                   ELSE (((%s - entry_price) * n_shares
+                          - COALESCE(entry_cost, 0)
+                          - ROUND(%s * n_shares * %s / 10000.0, 6))
+                         / (entry_price * n_shares)) * 100 END,
     updated_at = NOW()
 WHERE id = ANY(%s)
   AND status = 'open';
 """
 
+# t_f81b2bb2: open stamps entry_cost + cost_bps_applied so the exit leg can
+# net them out of pnl at close.
 SQL_OPEN_POSITIONS = """
 INSERT INTO gold.paper_trades_synthetic
   (strategy_id, ticker, direction, entry_date, entry_price, n_shares, status,
    signal_weight, assigned_capital, pnl, pnl_pct,
-   entry_price_source_date, entry_price_basis, created_at, updated_at)
+   entry_price_source_date, entry_price_basis, entry_cost, cost_bps_applied,
+   created_at, updated_at)
 VALUES %s;
 """
 
@@ -411,6 +484,71 @@ ON CONFLICT (strategy_id, ticker) DO UPDATE SET
   reason = EXCLUDED.reason,
   skip_date = EXCLUDED.skip_date,
   updated_at = EXCLUDED.updated_at;
+"""
+
+# ── Deployment-ratio surface (t_33ffe715) ────────────────────────────────
+# One row per active paper strategy, refreshed every run. See the migration
+# agents/etl/migrations/2026-10-28_strategy_paper_deployment_current.sql for
+# column definitions. PAPER_UAT strategies carry NO row (DB ledger empty by
+# design — broker session is book-of-record; a ratio would falsely read 0%).
+SQL_CREATE_DEPLOYMENT_CURRENT_TABLE = """
+CREATE TABLE IF NOT EXISTS consumption.strategy_paper_deployment_current (
+  strategy_id           TEXT PRIMARY KEY,
+  run_date              DATE NOT NULL,
+  assigned_capital      NUMERIC,
+  target_notional       NUMERIC,
+  invested_notional     NUMERIC,
+  pending_open_notional NUMERIC,
+  committed_notional    NUMERIC,
+  deployment_ratio      NUMERIC(9,6),
+  capital_utilization   NUMERIC(9,6),
+  undeployed_notional   NUMERIC,
+  skips_by_kind         JSONB,
+  max_position_pct      NUMERIC,
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+SQL_UPSERT_DEPLOYMENT_CURRENT = """
+INSERT INTO consumption.strategy_paper_deployment_current
+  (strategy_id, run_date, assigned_capital, target_notional,
+   invested_notional, pending_open_notional, committed_notional,
+   deployment_ratio, capital_utilization, undeployed_notional,
+   skips_by_kind, max_position_pct, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+ON CONFLICT (strategy_id) DO UPDATE SET
+  run_date = EXCLUDED.run_date,
+  assigned_capital = EXCLUDED.assigned_capital,
+  target_notional = EXCLUDED.target_notional,
+  invested_notional = EXCLUDED.invested_notional,
+  pending_open_notional = EXCLUDED.pending_open_notional,
+  committed_notional = EXCLUDED.committed_notional,
+  deployment_ratio = EXCLUDED.deployment_ratio,
+  capital_utilization = EXCLUDED.capital_utilization,
+  undeployed_notional = EXCLUDED.undeployed_notional,
+  skips_by_kind = EXCLUDED.skips_by_kind,
+  max_position_pct = EXCLUDED.max_position_pct,
+  updated_at = EXCLUDED.updated_at;
+"""
+
+SQL_DELETE_DEPLOYMENT_CURRENT = """
+DELETE FROM consumption.strategy_paper_deployment_current WHERE strategy_id = %s;
+"""
+
+SQL_DELETE_STALE_DEPLOYMENT_CURRENT = """
+DELETE FROM consumption.strategy_paper_deployment_current WHERE strategy_id <> ALL(%s);
+"""
+
+SQL_OPEN_COST_BASIS = """
+SELECT COALESCE(SUM(n_shares * entry_price), 0)
+FROM gold.paper_trades_synthetic
+WHERE strategy_id = %s AND status = 'open';
+"""
+
+SQL_PENDING_OPEN_ORDERS = """
+SELECT ticker, n_shares
+FROM gold.paper_pending_orders
+WHERE strategy_id = %s AND status = 'pending' AND order_kind = 'OPEN';
 """
 
 # ── Deferred fill orders (NEXT_OPEN convention, t_3454cc76) ──────────────
@@ -531,6 +669,44 @@ SELECT id FROM gold.paper_trades_synthetic
 WHERE strategy_id = %s AND ticker = %s AND status = 'open';
 """
 
+# ── Managed-runoff flat transition (t_0daa8eaf) ─────────────────────────
+# A retired PAPER book still monitored but now fully flat (no open legs,
+# nothing resting) has completed its runoff: deactivate paper monitoring
+# and log the archive event with the final exit details so qr_research
+# can record the terminal state. Idempotent (JOIN on is_active = TRUE).
+SQL_FETCH_FLAT_RUNOFF_BOOKS = """
+SELECT r.strategy_id
+FROM gold.strategy_registry r
+JOIN gold.strategy_paper_monitoring m
+  ON m.strategy_id = r.strategy_id AND m.is_active = TRUE
+WHERE r.retired_at IS NOT NULL
+  AND r.execution_mode = 'PAPER'
+  AND NOT EXISTS (SELECT 1 FROM gold.paper_trades_synthetic p
+                  WHERE p.strategy_id = r.strategy_id AND p.status = 'open')
+  AND NOT EXISTS (SELECT 1 FROM gold.paper_pending_orders o
+                  WHERE o.strategy_id = r.strategy_id AND o.status = 'pending');
+"""
+
+SQL_DEACTIVATE_RUNOFF_MONITORING = """
+UPDATE gold.strategy_paper_monitoring
+SET is_active = FALSE, deactivated_at = NOW(), updated_at = NOW()
+WHERE strategy_id = %s AND is_active = TRUE;
+"""
+
+SQL_RUNOFF_EXIT_DETAILS = """
+SELECT ticker, exit_date, exit_price, exit_price_basis, pnl
+FROM gold.paper_trades_synthetic
+WHERE strategy_id = %s AND status = 'closed'
+ORDER BY exit_date DESC
+LIMIT 10;
+"""
+
+SQL_LOG_RUNOFF_FLAT_EVENT = """
+INSERT INTO gold.agent_events
+  (event_type, strategy_id, domain, agent_name, payload_json, status)
+VALUES ('runoff_flat', %s, 'strategy_runoff', 'qr_etl', %s::jsonb, 'ok');
+"""
+
 
 # ---------------------------------------------------------------------------
 # PAPER_UAT firing helpers (kanban t_b64f7302, 2026-08-25)
@@ -645,6 +821,8 @@ def ensure_skip_tables(cur):
     cur.execute(SQL_CREATE_SKIP_LOG_TABLE)
     cur.execute(SQL_CREATE_SKIP_LOG_INDEX)
     cur.execute(SQL_CREATE_SKIP_CURRENT_TABLE)
+    # t_33ffe715: per-run deployment-ratio surface (sibling of skips_current).
+    cur.execute(SQL_CREATE_DEPLOYMENT_CURRENT_TABLE)
 
 
 def ensure_pending_tables(cur):
@@ -657,43 +835,89 @@ def ensure_pending_tables(cur):
 
 FILL_CONVENTIONS = ('NEXT_OPEN', 'SIGNAL_CLOSE')
 
+# Declarable registry values (t_716fe5a7). SIGNAL_CLOSE is deliberately not
+# declarable (no-lookahead standard); T1_CLOSE is reserved but not yet
+# engine-implemented, so a book declaring it must fail closed, never fall
+# back to a different convention silently.
+DECLARED_CONVENTIONS = ('NEXT_OPEN', 'T1_CLOSE')
+
 
 def fetch_fill_conventions(cur, strategy_ids):
-    """Per-strategy fill convention from gold.strategy_configs.
+    """Effective per-strategy fill convention map.
 
-    config_key='fill_convention', config_value jsonb: plain string
-    ('"SIGNAL_CLOSE"') or {"value": "SIGNAL_CLOSE"}. Default NEXT_OPEN;
-    invalid values are dropped with a warning so a bad config row can never
-    silently change the fill convention.
+    Resolution (t_716fe5a7), most-authoritative first:
+      1. gold.strategy_registry.entry_fill_convention — the declared
+         convention for the book (migration 2026-11-02).
+      2. gold.strategy_configs config_key='fill_convention' — legacy
+         per-strategy override, honoured only when the registry row has no
+         declaration; a conflict with a declaration is a loud warning and
+         the REGISTRY value wins.
+      3. Absent both: no entry here; resolve_fill_convention defaults to
+         NEXT_OPEN.
+
+    config_value jsonb: plain string ('"SIGNAL_CLOSE"') or
+    {"value": "SIGNAL_CLOSE"}. Invalid values are dropped with a warning so
+    a bad config row can never silently change the fill convention.
     """
     if not strategy_ids:
         return {}
-    cur.execute(SQL_FETCH_FILL_CONVENTIONS, (strategy_ids,))
     conventions = {}
+    cur.execute(SQL_FETCH_REGISTRY_CONVENTIONS, (strategy_ids,))
+    for sid, declared in cur.fetchall():
+        conv = str(declared).strip().upper()
+        if conv not in DECLARED_CONVENTIONS:
+            print(f"  {sid}: WARNING invalid registry entry_fill_convention "
+                  f"{declared!r}; ignoring declaration")
+            continue
+        conventions[sid] = conv
+    cur.execute(SQL_FETCH_FILL_CONVENTIONS, (strategy_ids,))
     for sid, val in cur.fetchall():
         if isinstance(val, dict):
             val = val.get('value')
         conv = str(val).strip().upper() if val is not None else ''
         if conv not in FILL_CONVENTIONS:
             print(f"  {sid}: WARNING invalid fill_convention config {val!r}; "
-                  f"falling back to NEXT_OPEN")
+                  f"falling back to declared/default convention")
+            continue
+        if sid in conventions:
+            if conventions[sid] != conv:
+                print(f"  {sid}: WARNING fill_convention config {conv} conflicts "
+                      f"with declared entry_fill_convention "
+                      f"{conventions[sid]}; DECLARED value wins")
             continue
         conventions[sid] = conv
     return conventions
 
 
 def resolve_fill_convention(conventions, strategy_id):
-    """Effective fill convention: per-strategy override, else NEXT_OPEN."""
+    """Effective fill convention: declaration/override, else NEXT_OPEN.
+
+    Fail closed (t_716fe5a7): a declared convention the engine cannot
+    execute (e.g. T1_CLOSE) raises instead of silently filling on a
+    different basis.
+    """
+    conv = 'NEXT_OPEN'
     if conventions and strategy_id in conventions:
-        return conventions[strategy_id]
-    return 'NEXT_OPEN'
+        conv = conventions[strategy_id]
+    if conv not in FILL_CONVENTIONS:
+        raise ValueError(
+            f"{strategy_id}: declared entry_fill_convention {conv!r} is not "
+            f"engine-implemented {FILL_CONVENTIONS}; refusing to fill on an "
+            f"undeclared basis")
+    return conv
 
 
 def fetch_pending_maps(cur, strategy_ids):
-    """Pending-order dedupe maps: ({sid: {ticker}}, {position_id}).
+    """Pending-order dedupe maps: ({sid: {ticker: booked_shares}}, {position_id}).
 
     OPEN map prevents double-booking a pending entry; CLOSE map prevents
     double-booking an exit for a position that already has a resting close.
+    The OPEN map carries the order's BOOKED n_shares (t_3effb556): the
+    delta clamp debits the budget by what the resting order will actually
+    consume at settle, not by the freshly computed target — a resting order
+    booked at a clamped size smaller than target must not over-debit and
+    wall out new entries (SUE 2026-11 remediation: ADBE OVER_DEPLOYED on
+    $47 remaining while $24k of real budget sat uncounted).
     """
     open_tickers = {}
     close_posids = set()
@@ -702,7 +926,8 @@ def fetch_pending_maps(cur, strategy_ids):
     cur.execute(SQL_FETCH_PENDING_ORDERS, (strategy_ids,))
     for r in cur.fetchall():
         if r[3] == 'OPEN':
-            open_tickers.setdefault(r[1], set()).add(r[2])
+            open_tickers.setdefault(r[1], {})[r[2]] = (
+                float(r[6]) if r[6] is not None else None)
         elif r[5] is not None:
             close_posids.add(r[5])
     return open_tickers, close_posids
@@ -834,12 +1059,13 @@ def settle_pending_orders(cur, today, strategy_ids, now_utc=None):
                 continue
             open_new_positions(cur, [(
                 sid, ticker, bar_date, price, n_shares, weight, cap,
-                bar_date, basis
+                bar_date, basis, resolve_cost_bps(cur, sid, ticker)
             )])
             filled_open += 1
         else:
             close_positions(cur, bar_date, [position_id], price,
-                            source_date=bar_date, basis=basis)
+                            source_date=bar_date, basis=basis,
+                            cost_bps=resolve_cost_bps(cur, sid, ticker))
             filled_close += 1
         cur.execute(SQL_MARK_ORDER_FILLED, (bar_date, price, oid))
         print(f"  {sid}: FILLED {kind} {ticker} @ {price} ({basis}, "
@@ -862,20 +1088,42 @@ def fetch_active_strategies(cur, strategy_id=None):
         params = (strategy_id,)
     cur.execute(f"""
         SELECT
-          strategy_id,
-          name,
-          execution_mode,
-          assigned_capital,
-          universe_tickers,
-          frequency
-        FROM gold.strategy_registry
-        WHERE retired_at IS NULL
-          AND execution_mode IN ('PAPER', 'SIMULATION', 'PAPER_UAT')
-          AND COALESCE(disable_paper_rebuild, FALSE) = FALSE
-          AND universe_tickers IS NOT NULL
-          AND array_length(universe_tickers, 1) > 0
+          r.strategy_id,
+          r.name,
+          r.execution_mode,
+          r.assigned_capital,
+          r.universe_tickers,
+          r.frequency,
+          r.signal_mechanism,
+          (r.retired_at IS NOT NULL) AS runoff
+        FROM gold.strategy_registry r
+        WHERE (
+            r.retired_at IS NULL
+            AND r.status <> 'retired'  -- hygiene: status='retired' with retired_at NULL
+                                       -- must not re-enter the active set
+                                       -- (nfp_equity_drift_long tripped SIGNAL_STALE 2026-11-02)
+            AND r.execution_mode IN ('PAPER', 'SIMULATION', 'PAPER_UAT')
+            AND COALESCE(r.disable_paper_rebuild, FALSE) = FALSE
+            AND r.universe_tickers IS NOT NULL
+            AND array_length(r.universe_tickers, 1) > 0
+          )
+          OR (
+            -- MANAGED RUNOFF (t_0daa8eaf): a retired PAPER book with open
+            -- legs or resting orders stays in the rebuild set so existing
+            -- legs are managed to their rule-consistent exits. Self-
+            -- terminating: once flat with nothing resting, the row drops
+            -- out and the book is fully archived. New entries are
+            -- suppressed in rebalance_strategy (RUNOFF_NO_ENTRY skips).
+            r.retired_at IS NOT NULL
+            AND r.execution_mode = 'PAPER'
+            AND COALESCE(r.disable_paper_rebuild, FALSE) = FALSE
+            AND (EXISTS (SELECT 1 FROM gold.paper_trades_synthetic p
+                         WHERE p.strategy_id = r.strategy_id AND p.status = 'open')
+                 OR EXISTS (SELECT 1 FROM gold.paper_pending_orders o
+                            WHERE o.strategy_id = r.strategy_id AND o.status = 'pending'))
+          )
           {strategy_filter}
-        ORDER BY strategy_id;
+        ORDER BY r.strategy_id;
     """, params)
     rows = cur.fetchall()
     return [
@@ -886,6 +1134,8 @@ def fetch_active_strategies(cur, strategy_id=None):
             'capital': r[3] or 0,
             'universe': r[4] or [],
             'frequency': r[5],
+            'signal_mechanism': r[6],
+            'runoff': bool(r[7]),
         }
         for r in rows
     ]
@@ -907,6 +1157,52 @@ def fetch_prices(cur, tickers):
 def close_map_of(prices):
     """{ticker: latest close} — sizing/signal-publish view of the bar map."""
     return {t: b['close'] for t, b in prices.items()}
+
+
+# ── Declared cost model (t_f81b2bb2) ──────────────────────────────────────
+# Per-strategy cost bps lives in gold.strategy_configs config_key='cost_bps'
+# (seeded by migrations/2026-10-28_paper_trade_cost_model.sql from the
+# approved handoff manifests / backtest engines). Shape:
+#   {"default": <bps>, "markets": {"US": 5, "HK": 15, ...}}
+# Resolution: markets[market] when present, else default, else 0 (gross).
+# CASH legs are always 0.
+SQL_FETCH_COST_MODEL = """
+SELECT config_value FROM gold.strategy_configs
+WHERE strategy_id = %s AND config_key = 'cost_bps';
+"""
+
+SQL_TICKER_MARKET = """
+SELECT COALESCE(
+  (SELECT market FROM gold.asset_registry
+    WHERE ticker = %s AND market IS NOT NULL LIMIT 1),
+  (SELECT market FROM silver.unified_prices
+    WHERE ticker = %s AND market IS NOT NULL LIMIT 1));
+"""
+
+_COST_MODEL_CACHE = {}
+_MARKET_CACHE = {}
+
+
+def resolve_cost_bps(cur, sid, ticker):
+    """Declared cost bps per leg for (strategy, ticker). 0 when the strategy
+    has no cost_bps config row (gross) — the config row documents which."""
+    if ticker == 'CASH':
+        return 0.0
+    if sid not in _COST_MODEL_CACHE:
+        cur.execute(SQL_FETCH_COST_MODEL, (sid,))
+        row = cur.fetchone()
+        _COST_MODEL_CACHE[sid] = (row[0] if row and row[0] else {}) or {}
+    cfg = _COST_MODEL_CACHE[sid]
+    if ticker not in _MARKET_CACHE:
+        cur.execute(SQL_TICKER_MARKET, (ticker, ticker))
+        row = cur.fetchone()
+        _MARKET_CACHE[ticker] = row[0] if row else None
+    market = _MARKET_CACHE[ticker]
+    markets = cfg.get('markets') or {}
+    if market is not None and str(market) in markets:
+        return float(markets[str(market)])
+    default = cfg.get('default')
+    return float(default) if default is not None else 0.0
 
 
 def fetch_scores(cur, strategy_ids):
@@ -1036,6 +1332,32 @@ def fetch_paper_designs(cur, strategy_ids):
     return designs
 
 
+def fetch_rotation_top_n(cur, strategy_ids):
+    """Declared fixed-screen size for rank-bounded rotation (t_fdc57b21).
+
+    config_key='rotation_top_n', numeric jsonb integer >= 1: the strategy
+    trades a fixed top-N screen of its BUY signals. Returns
+    {strategy_id: int}. Invalid or out-of-range rows are dropped with a
+    warning — a bad row must neither silently disable the screen nor
+    silently enable a trim.
+    """
+    if not strategy_ids:
+        return {}
+    cur.execute(SQL_FETCH_ROTATION_TOP_N, (strategy_ids,))
+    out = {}
+    for sid, val in cur.fetchall():
+        try:
+            n = int(val)
+        except (TypeError, ValueError):
+            print(f"  {sid}: WARNING invalid rotation_top_n {val!r}; ignoring")
+            continue
+        if n < 1:
+            print(f"  {sid}: WARNING rotation_top_n {n} < 1; ignoring")
+            continue
+        out[sid] = n
+    return out
+
+
 def resolve_cap_with_source(overrides, designs, strategy_id, default_pct):
     """Effective concentration cap AND its declaration source (t_ee1ab601).
 
@@ -1126,6 +1448,108 @@ def decide_rebalance(frequency, today, state, backfill=False, force_rebalance=Fa
 
 def ensure_rebalance_state_table(cur):
     cur.execute(SQL_CREATE_REBALANCE_STATE_TABLE)
+
+
+# ── Signal-staleness guard (t_6d1ddfe8) ─────────────────────────────────────
+# SUE incident 2026-10: the October signal file landed 16 days late, so the
+# 10-01 rebalance fired on STALE August targets and the cadence gate then
+# suppressed the true October targets for a full month — silently. This guard
+# FAILS CLOSED: when a gated rebalance is due but the ingested signal file's
+# evidence date (signal_date, else computed_at) predates the last trading day
+# of the prior period, the rebalance is BLOCKED (book held, period left OPEN
+# so it auto re-fires when a fresh file lands) and a SIGNAL_STALE alert row is
+# surfaced to the skip tables; the run exits non-zero so the pipeline alerts.
+SQL_FETCH_SIGNAL_FRESHNESS = """
+SELECT max(computed_at)::date,
+       max((criteria_met->>'signal_date')::date)
+         FILTER (WHERE criteria_met->>'signal_date' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+FROM gold.strategy_ticker_scores
+WHERE strategy_id = %s;
+"""
+
+SQL_FETCH_US_HOLIDAYS = """
+SELECT holiday_date FROM gold.us_market_holidays
+WHERE holiday_date BETWEEN %s AND %s;
+"""
+
+SQL_FETCH_EXCHANGE_HOLIDAYS = """
+SELECT holiday_date FROM gold.exchange_holidays
+WHERE market = %s AND holiday_date BETWEEN %s AND %s;
+"""
+
+_MARKET_BY_SUFFIX = {'.HK': 'HK', '.SI': 'SG', '.SS': 'CN', '.SZ': 'CN'}
+
+
+def infer_home_market(universe):
+    """Home calendar for a strategy's universe: majority ticker suffix
+    (.HK->HK, .SI->SG, .SS/.SZ->CN), default US. Pure function."""
+    counts = {'US': 0, 'HK': 0, 'CN': 0, 'SG': 0}
+    for t in universe or []:
+        market = 'US'
+        for sfx, m in _MARKET_BY_SUFFIX.items():
+            if str(t).upper().endswith(sfx):
+                market = m
+                break
+        counts[market] += 1
+    return max(counts, key=lambda m: (counts[m], m == 'US')) if any(counts.values()) else 'US'
+
+
+def prior_period_last_trading_day(frequency, today, holidays):
+    """Last trading day of the cadence period BEFORE today's period.
+
+    monthly -> last calendar day of the prior month
+    weekly  -> Sunday before this ISO week's Monday (last day of prior week)
+    then walked back over weekends and `holidays` (set of dates).
+
+    A fresh signal file for the new period must carry an evidence date >=
+    this date: it is the last bar research could possibly have used when
+    generating on time. Pure function — unit-tested without a DB.
+    """
+    f = normalize_frequency(frequency)
+    holidays = holidays or set()
+    if f == 'monthly':
+        d = today.replace(day=1) - timedelta(days=1)
+    elif f == 'weekly':
+        d = today - timedelta(days=today.isoweekday())  # Sunday before Monday
+    else:
+        return None
+    while d.weekday() >= 5 or d in holidays:
+        d -= timedelta(days=1)
+    return d
+
+
+def signal_freshness_verdict(evidence, expected):
+    """(fresh, detail). Fail closed: no evidence -> stale."""
+    if expected is None:
+        return True, 'ungated cadence'
+    if evidence is None:
+        return False, f'no signal evidence date (expected >= {expected})'
+    if evidence >= expected:
+        return True, f'signal evidence {evidence} >= {expected}'
+    return False, f'signal evidence {evidence} older than prior-period close {expected}'
+
+
+def fetch_signal_evidence_date(cur, sid):
+    """Freshness evidence for an ingested strategy: prefer the file's own
+    signal_date (a regenerated OLD-period file must not look fresh from its
+    new computed_at); fall back to max(computed_at) for rows ingested before
+    signal_date persistence landed (t_6d1ddfe8 ingest patch)."""
+    cur.execute(SQL_FETCH_SIGNAL_FRESHNESS, (sid,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    computed_d, signal_d = row[0], row[1]
+    return signal_d or computed_d
+
+
+def fetch_holidays(cur, market, lo, hi):
+    """Holiday set for the home market over [lo, hi]; empty table -> weekend-
+    only walk-back (acceptable fallback, still fail-closed on dates)."""
+    if market == 'US':
+        cur.execute(SQL_FETCH_US_HOLIDAYS, (lo, hi))
+    else:
+        cur.execute(SQL_FETCH_EXCHANGE_HOLIDAYS, (market, lo, hi))
+    return {r[0] for r in cur.fetchall()}
 
 
 def fetch_rebalance_state(cur, strategy_ids):
@@ -1418,7 +1842,11 @@ def clamp_new_opens(targets, open_tickers, retained_cost, budget, lots,
     Pure function. Returns (clamped_targets, extra_skips):
     - targets for tickers already held pass through untouched;
     - targets with a resting pending OPEN pass through untouched but
-      consume budget (their settle will deploy that capital);
+      consume budget AT THEIR BOOKED SIZE (t_3effb556 — their settle
+      deploys the booked shares, not the freshly computed target; debiting
+      the target after a clamped booking over-counts and walls out new
+      entries). When the booked size is unknown (legacy set-form map or
+      NULL n_shares) the target size is debited — conservative fallback.
     - new entries are filled in rank order (compute_target order),
       each floored to whole lots at min(target notional, remaining);
     - a new entry that cannot afford one lot within the remaining budget
@@ -1441,8 +1869,13 @@ def clamp_new_opens(targets, open_tickers, retained_cost, budget, lots,
         lot_cost = price_f * lot
         if tk in pend_open_tickers:
             # Resting entry already booked: it will consume budget on
-            # settle, so debit it here to avoid double-deploying.
-            remaining -= t['shares'] * price_f
+            # settle, so debit it here to avoid double-deploying. Debit
+            # the BOOKED share count when the map carries it (dict form);
+            # fall back to the target size otherwise (conservative).
+            booked = (pend_open_tickers.get(tk)
+                      if hasattr(pend_open_tickers, 'get') else None)
+            debit_shares = float(booked) if booked else t['shares']
+            remaining -= debit_shares * price_f
             clamped.append(t)
             continue
         alloc = min(t['shares'] * price_f, max(0.0, remaining))
@@ -1471,12 +1904,16 @@ def clamp_new_opens(targets, open_tickers, retained_cost, budget, lots,
     return clamped, extra_skips
 
 
-def close_positions(cur, exit_date, close_ids, close_price, source_date=None, basis=None):
+def close_positions(cur, exit_date, close_ids, close_price, source_date=None, basis=None, cost_bps=0.0):
     if not close_ids:
         return 0
+    bps = float(cost_bps or 0.0)
     cur.execute(SQL_CLOSE_POSITIONS, (
         exit_date, close_price, source_date, basis,
-        close_price, close_price, close_ids
+        close_price, bps, bps,
+        close_price, close_price, bps,
+        close_price, close_price, bps,
+        close_ids
     ))
     return cur.rowcount
 
@@ -1484,18 +1921,24 @@ def close_positions(cur, exit_date, close_ids, close_price, source_date=None, ba
 def open_new_positions(cur, open_values):
     """open_values rows: (strategy_id, ticker, entry_date, entry_price,
     n_shares, signal_weight, assigned_capital, entry_price_source_date,
-    entry_price_basis)."""
+    entry_price_basis, cost_bps). entry_cost = price*shares*bps/1e4 is
+    computed here (t_f81b2bb2)."""
     if not open_values:
         return 0
     from psycopg2.extras import execute_values
+    rows = [
+        r[:9] + (round(float(r[3]) * float(r[4]) * float(r[9] or 0) / 10000.0, 6),
+                 float(r[9] or 0))
+        for r in open_values
+    ]
     execute_values(
         cur, SQL_OPEN_POSITIONS,
-        open_values,
+        rows,
         # t_8b58b2bc: open rows carry pnl/pnl_pct NULL until close. A hardcoded
         # 0 made every open row look like a losing closed trade to any reader
         # filtering on `pnl IS NOT NULL` (e.g. the evaluation endpoint),
         # corrupting WR/PF/trade counts (memo 2026-08-17 section 2.3).
-        template="(%s, %s, 'LONG', %s, %s, %s, 'open', %s, %s, NULL, NULL, %s, %s, NOW(), NOW())"
+        template="(%s, %s, 'LONG', %s, %s, %s, 'open', %s, %s, NULL, NULL, %s, %s, %s, %s, NOW(), NOW())"
     )
     return cur.rowcount
 
@@ -1551,7 +1994,92 @@ def write_skips(cur, today, sid, skipped):
     )
 
 
-def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lots, backfill=False, max_position_pct=0.20, execute_rebalance=True, gate_reason='', convention='NEXT_OPEN', pend_open_tickers=None, pend_close_posids=None, dry_run=False):
+def compute_deployment(cur, sid, capital, current_signals, skipped, close_map,
+                       max_position_pct):
+    """Compute the per-book deployment ratio for this run. Pure read + math;
+    returns the metric dict without writing. Called AFTER the run's position
+    mutations so invested_notional reflects the post-run book.
+
+    target_notional: deployable budget = capital * BUY-score share (same
+    formula as compute_target / deployable_budget — the CASH signal share is
+    designed cash, not drag, so it is excluded from the target).
+    invested_notional: post-run open-position cost basis from the ledger.
+    pending_open_notional: resting NEXT_OPEN entries valued at the
+    signal-bar close (committed but not yet filled).
+    deployment_ratio: committed / target (NULL when target <= 0); < 1.0 is
+    lot/cap quantization drag. capital_utilization: committed / assigned
+    capital (gap includes the designed CASH residual).
+    """
+    capital_f = float(capital or 0)
+    target = deployable_budget(current_signals, capital_f)
+
+    cur.execute(SQL_OPEN_COST_BASIS, (sid,))
+    invested = float(cur.fetchone()[0] or 0)
+
+    cur.execute(SQL_PENDING_OPEN_ORDERS, (sid,))
+    pending = 0.0
+    pending_unpriced = 0
+    for ticker, n_shares in cur.fetchall():
+        price = close_map.get(ticker)
+        if price is None or float(price) <= 0:
+            pending_unpriced += 1
+            continue
+        pending += float(n_shares or 0) * float(price)
+
+    committed = invested + pending
+    skips_by_kind = {}
+    for sk in skipped:
+        skips_by_kind[sk['skip_kind']] = skips_by_kind.get(sk['skip_kind'], 0) + 1
+
+    return {
+        'strategy_id': sid,
+        'assigned_capital': round(capital_f, 2),
+        'target_notional': round(target, 2),
+        'invested_notional': round(invested, 2),
+        'pending_open_notional': round(pending, 2),
+        'committed_notional': round(committed, 2),
+        'deployment_ratio': (round(committed / target, 6)
+                             if target > 0 else None),
+        'capital_utilization': (round(committed / capital_f, 6)
+                                if capital_f > 0 else None),
+        'undeployed_notional': round(target - committed, 2),
+        'skips_by_kind': skips_by_kind,
+        'max_position_pct': max_position_pct,
+        'pending_unpriced_orders': pending_unpriced,
+    }
+
+
+def write_deployment(cur, today, strategy, current_signals, skipped,
+                     close_map, max_position_pct):
+    """Persist the per-run deployment ratio (t_33ffe715).
+
+    consumption.strategy_paper_deployment_current carries one row per active
+    paper strategy so the UI tile can show invested/target — a 15% cash drag
+    from whole-lot + concentration-cap quantization no longer reads as a
+    clean book. PAPER_UAT books carry NO row: their DB ledger is empty by
+    design (broker session is book-of-record), so a computed ratio would
+    falsely read 0% deployed; any stale row is deleted instead.
+    """
+    sid = strategy['strategy_id']
+    if strategy.get('mode') == 'PAPER_UAT':
+        cur.execute(SQL_DELETE_DEPLOYMENT_CURRENT, (sid,))
+        return None
+    dep = compute_deployment(cur, sid, strategy['capital'] or 0,
+                             current_signals, skipped, close_map,
+                             max_position_pct)
+    from psycopg2.extras import Json
+    cur.execute(SQL_UPSERT_DEPLOYMENT_CURRENT, (
+        sid, today,
+        dep['assigned_capital'], dep['target_notional'],
+        dep['invested_notional'], dep['pending_open_notional'],
+        dep['committed_notional'], dep['deployment_ratio'],
+        dep['capital_utilization'], dep['undeployed_notional'],
+        Json(dep['skips_by_kind']), dep['max_position_pct'],
+    ))
+    return dep
+
+
+def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lots, backfill=False, max_position_pct=0.20, execute_rebalance=True, gate_reason='', convention='NEXT_OPEN', pend_open_tickers=None, pend_close_posids=None, dry_run=False, stale_block=False):
     sid = strategy['strategy_id']
     capital = strategy['capital'] or 0
     current_signals = signals.get(sid, [])
@@ -1565,17 +2093,101 @@ def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lo
     score_map = {s['ticker']: s['score'] for s in current_signals}
     action_map = {s['ticker']: s['action'] for s in current_signals}
 
+    open_by_ticker = open_positions.get(sid, {})
+    open_tickers = set(open_by_ticker.keys())
+
+    # Rank-bounded rotation screen (t_fdc57b21): a strategy with a declared
+    # gold.strategy_configs rotation_top_n=N trades a FIXED top-N screen of
+    # its BUY signals ("exited when they leave the screen"). When the score
+    # table publishes more than N BUY rows, only the N highest-scored BUYs
+    # (ties: ticker asc) form the effective target book:
+    #   - held positions ranked OUTSIDE the screen exit via the normal
+    #     close path (to_close below), releasing their cost basis;
+    #   - non-held out-of-screen BUYs surface as ROTATION_TRIM skips;
+    #   - sizing (compute_target / deployable_budget) and the delta clamp
+    #     run on the screened signal set.
+    # Without this, a fully-deployed book whose held names keep ANY BUY row
+    # can never rotate: to_close is empty, the delta clamp counts the whole
+    # book as retained cost, and every new entry hits the OVER_DEPLOYED wall
+    # (SUE 2026-11: 56 BUYs vs 20-slot design; 35 OVER_DEPLOYED, 0 closes,
+    # period consumed with zero rotation). Absent config = legacy behaviour,
+    # unchanged. Signal PUBLICATION below still uses the unscreened set.
+    rotation_top_n = strategy.get('rotation_top_n')
+    eff_signals = current_signals
+    skipped = []
+    if rotation_top_n:
+        buys_ranked = sorted(
+            (s for s in current_signals if s['action'] == 'BUY'),
+            key=lambda s: (-float(s['score'] or 0), s['ticker']))
+        if len(buys_ranked) > rotation_top_n:
+            keep = {s['ticker'] for s in buys_ranked[:rotation_top_n]}
+            trimmed = buys_ranked[rotation_top_n:]
+            eff_signals = [s for s in current_signals
+                           if s['action'] != 'BUY' or s['ticker'] in keep]
+            n_held_trim = sum(1 for s in trimmed if s['ticker'] in open_tickers)
+            print(f"  {sid}: ROTATION SCREEN top-{rotation_top_n}: "
+                  f"{len(buys_ranked)} BUYs -> {len(keep)} in screen, "
+                  f"{len(trimmed)} trimmed ({n_held_trim} held laggard(s) "
+                  f"exit at this boundary)")
+            if execute_rebalance:
+                for rank, s in enumerate(trimmed, start=rotation_top_n + 1):
+                    if s['ticker'] in open_tickers:
+                        continue  # held laggard: exits via the close path
+                    px = close_map.get(s['ticker'])
+                    lot = lot_size_for(s['ticker'], lots)
+                    skipped.append({
+                        'ticker': s['ticker'],
+                        'signal_action': 'BUY',
+                        'score': s['score'],
+                        'weight': None,
+                        'slot_notional': None,
+                        'price': px,
+                        'lot_size': lot,
+                        'lot_cost': (round(float(px) * lot, 2)
+                                     if px is not None else None),
+                        'skip_kind': 'ROTATION_TRIM',
+                        'reason': (f"ranked #{rank} of {len(buys_ranked)} "
+                                   f"BUYs; book screen is top-{rotation_top_n} "
+                                   f"(strategy_configs rotation_top_n); "
+                                   f"not held -> no entry"),
+                    })
+
     # Target positions for BUY tickers only
     # Determine target allocations from the full scoring engine output
     # (including CASH/HOLD), then open only the BUY tickers.
     # Sizing uses the latest CLOSE as the proxy price; the actual fill under
     # NEXT_OPEN happens later at the fill bar's open.
-    targets, skipped = compute_target(current_signals, capital, close_map, lots, max_position_pct=max_position_pct)
-    buy_signals = [s for s in current_signals if s['action'] == 'BUY']
+    targets, sizing_skips = compute_target(eff_signals, capital, close_map, lots, max_position_pct=max_position_pct)
+    skipped.extend(sizing_skips)
+    buy_signals = [s for s in eff_signals if s['action'] == 'BUY']
     target_tickers = {t['ticker'] for t in targets}
 
-    open_by_ticker = open_positions.get(sid, {})
-    open_tickers = set(open_by_ticker.keys())
+    # MANAGED RUNOFF (t_0daa8eaf): a retired strategy still holding open
+    # legs is CLOSE-ONLY. Every BUY target for a ticker not already held
+    # is suppressed and surfaced as a RUNOFF_NO_ENTRY skip so the audit
+    # trail shows the engine saw the signal and refused the entry by
+    # operator policy (retirement = managed runoff, not re-entry). Held
+    # legs are untouched here; exits below follow the normal
+    # rule-consistent path (close when the ticker leaves the BUY set).
+    if strategy.get('runoff'):
+        suppressed = [t for t in targets if t['ticker'] not in open_tickers]
+        for t in suppressed:
+            skipped.append({
+                'ticker': t['ticker'],
+                'signal_action': 'BUY',
+                'score': t['score'],
+                'weight': round(t['weight'], 6),
+                'slot_notional': round(float(capital) * t['weight'], 2),
+                'price': t['price'],
+                'lot_size': lot_size_for(t['ticker'], lots),
+                'lot_cost': round(float(t['price']) * lot_size_for(t['ticker'], lots), 2),
+                'skip_kind': 'RUNOFF_NO_ENTRY',
+                'reason': 'managed runoff (retired book): no new entries; '
+                          'existing legs managed to rule-consistent exit only',
+            })
+            print(f"  {sid}: RUNOFF_NO_ENTRY {t['ticker']} - retired book is "
+                  f"close-only; BUY signal not entered")
+        targets = [t for t in targets if t['ticker'] in open_tickers]
 
     # Delta-mode deployment clamp (2026-09-18, t_5f69e8c0): existing
     # positions keep their sizes in delta mode, so NEW entries are sized
@@ -1600,7 +2212,7 @@ def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lo
             for tk in retained_tickers)
         targets, clamp_skips = clamp_new_opens(
             targets, open_tickers, retained_cost,
-            deployable_budget(current_signals, capital), lots,
+            deployable_budget(eff_signals, capital), lots,
             pend_open_tickers=pend_open_tickers)
         skipped.extend(clamp_skips)
 
@@ -1611,33 +2223,59 @@ def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lo
     # (including tickers whose signal flipped HOLD mid-period) are left
     # untouched; deferred exits are logged to stdout only.
     if not execute_rebalance:
-        # A target that already produced a sizing skip (e.g. CONCENTRATION_CAP)
-        # must not ALSO get a CADENCE_GATE row: the skip-current upsert keys on
-        # (strategy_id, ticker) and duplicate keys in one batch raise
-        # CardinalityViolation.
-        already_skipped = {sk['ticker'] for sk in skipped}
-        gated_new = [t for t in targets if t['ticker'] not in open_tickers
-                     and t['ticker'] not in already_skipped]
-        for t in gated_new:
-            skipped.append({
-                'ticker': t['ticker'],
+        if stale_block:
+            # Signal-staleness guard (t_6d1ddfe8): the scheduled rebalance was
+            # BLOCKED because the ingested signal file is older than one
+            # cadence period. Sizing skips computed off the stale targets are
+            # noise — replace the whole batch with exactly ONE operator-visible
+            # alert row (ticker='*'). Positions are untouched (the
+            # execute_rebalance=False path guarantees this) and the run exits
+            # non-zero so the pipeline hard-fails to Telegram.
+            skipped = [{
+                'ticker': '*',
                 'signal_action': 'BUY',
-                'score': t['score'],
-                'weight': round(t['weight'], 6),
-                'slot_notional': round(float(capital) * t['weight'], 2),
-                'price': t['price'],
-                'lot_size': lot_size_for(t['ticker'], lots),
-                'lot_cost': round(float(t['price']) * lot_size_for(t['ticker'], lots), 2),
-                'skip_kind': 'CADENCE_GATE',
-                'reason': f"entry deferred by cadence gate ({gate_reason})",
-            })
-        buy_set = {s['ticker'] for s in buy_signals}
-        deferred_exits = sorted(t for t in open_tickers if t not in buy_set
-                                and open_by_ticker[t]['entry_date'] != today)
-        print(f"  {sid}: CADENCE GATE active ({gate_reason}) - signals published, "
-              f"positions unchanged ({len(gated_new)} entries deferred"
-              + (f", {len(deferred_exits)} exits deferred: {', '.join(deferred_exits)}"
-                 if deferred_exits else "") + ")")
+                'score': None,
+                'weight': None,
+                'slot_notional': None,
+                'price': None,
+                'lot_size': None,
+                'lot_cost': None,
+                'skip_kind': 'SIGNAL_STALE',
+                'reason': gate_reason,
+            }]
+        else:
+            # A target that already produced a sizing skip (e.g. CONCENTRATION_CAP)
+            # must not ALSO get a CADENCE_GATE row: the skip-current upsert keys on
+            # (strategy_id, ticker) and duplicate keys in one batch raise
+            # CardinalityViolation.
+            already_skipped = {sk['ticker'] for sk in skipped}
+            # t_a300dee2: a ticker with a resting pending OPEN order is already
+            # booked — re-surfacing it as CADENCE_GATE double-counts unfilled
+            # work in the UI (2026-11-02: 28 resting OPENs mislabeled as
+            # CADENCE_GATE, "31 unfilled" = 28 resting + 3 genuine).
+            gated_new = [t for t in targets if t['ticker'] not in open_tickers
+                         and t['ticker'] not in pend_open_tickers
+                         and t['ticker'] not in already_skipped]
+            for t in gated_new:
+                skipped.append({
+                    'ticker': t['ticker'],
+                    'signal_action': 'BUY',
+                    'score': t['score'],
+                    'weight': round(t['weight'], 6),
+                    'slot_notional': round(float(capital) * t['weight'], 2),
+                    'price': t['price'],
+                    'lot_size': lot_size_for(t['ticker'], lots),
+                    'lot_cost': round(float(t['price']) * lot_size_for(t['ticker'], lots), 2),
+                    'skip_kind': 'CADENCE_GATE',
+                    'reason': f"entry deferred by cadence gate ({gate_reason})",
+                })
+            buy_set = {s['ticker'] for s in buy_signals}
+            deferred_exits = sorted(t for t in open_tickers if t not in buy_set
+                                    and open_by_ticker[t]['entry_date'] != today)
+            print(f"  {sid}: CADENCE GATE active ({gate_reason}) - signals published, "
+                  f"positions unchanged ({len(gated_new)} entries deferred"
+                  + (f", {len(deferred_exits)} exits deferred: {', '.join(deferred_exits)}"
+                     if deferred_exits else "") + ")")
 
     # Explicit skip surface: a BUY signal that cannot be sized is never
     # silently dropped. Every skip is printed, appended to
@@ -1650,7 +2288,7 @@ def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lo
         if sk['skip_kind'] == 'NO_PRICE':
             print(f"  {sid}: SKIP {sk['ticker']} [NO_PRICE] - {sk['reason']} "
                   f"(slot ${sk['slot_notional']:,.2f} undeployable)")
-        elif sk['skip_kind'] in ('CONCENTRATION_CAP', 'CADENCE_GATE', 'OVER_DEPLOYED'):
+        elif sk['skip_kind'] in ('CONCENTRATION_CAP', 'CADENCE_GATE', 'OVER_DEPLOYED', 'SIGNAL_STALE', 'RUNOFF_NO_ENTRY', 'ROTATION_TRIM'):
             print(f"  {sid}: SKIP {sk['ticker']} [{sk['skip_kind']}] - {sk['reason']}")
         else:
             print(f"  {sid}: SKIP {sk['ticker']} [{sk['skip_kind']}] - {sk['reason']} "
@@ -1752,7 +2390,8 @@ def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lo
                 cdate = bar['date'] if bar else None
                 close_count += close_positions(
                     cur, cdate or today, [pos['id']], cprice,
-                    source_date=cdate, basis='SIGNAL_CLOSE')
+                    source_date=cdate, basis='SIGNAL_CLOSE',
+                    cost_bps=resolve_cost_bps(cur, sid, t))
 
             # Open positions for targets not currently held
             held_tickers = open_tickers - to_close
@@ -1768,7 +2407,8 @@ def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lo
                 open_values.append((
                     sid, t['ticker'], bar['date'], t['price'], t['shares'],
                     round(t['weight'] * 100, 4), capital,
-                    bar['date'], 'SIGNAL_CLOSE'
+                    bar['date'], 'SIGNAL_CLOSE',
+                    resolve_cost_bps(cur, sid, t['ticker'])
                 ))
             open_count = open_new_positions(cur, open_values)
         else:
@@ -1836,6 +2476,26 @@ def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lo
     # Keep the canonical win_rate copy in sync with the registry (t_bc9e8d3c).
     cur.execute(SQL_REFRESH_SIGNAL_WIN_RATE, (sid,))
 
+    # Deployment-ratio surface (t_33ffe715): computed AFTER this run's
+    # position mutations so invested_notional reflects the post-run book
+    # (SIGNAL_CLOSE entries are already in the ledger; NEXT_OPEN entries
+    # are counted via resting pending orders). Target budget uses the
+    # SCREENED signal set (t_fdc57b21): the ratio measures deployment of
+    # the book the engine can actually hold.
+    dep = write_deployment(cur, today, strategy, eff_signals, skipped,
+                           close_map, max_position_pct)
+    if dep is not None:
+        ratio_txt = (f"{dep['deployment_ratio']:.1%}"
+                     if dep['deployment_ratio'] is not None else "n/a")
+        util_txt = (f"{dep['capital_utilization']:.1%}"
+                    if dep['capital_utilization'] is not None else "n/a")
+        print(f"  {sid}: DEPLOYMENT committed ${dep['committed_notional']:,.2f} "
+              f"of target ${dep['target_notional']:,.2f} "
+              f"(ratio {ratio_txt}; capital utilization {util_txt} of "
+              f"${dep['assigned_capital']:,.2f})"
+              + (f"; {dep['pending_unpriced_orders']} pending order(s) unpriced"
+                 if dep['pending_unpriced_orders'] else ""))
+
     if uat_error is not None:
         # Deferred PAPER_UAT hard fail: signals are published above (qr_etl
         # owns signal state), now abort the firing pass — run() catches this,
@@ -1851,6 +2511,8 @@ def rebalance_strategy(cur, today, strategy, prices, signals, open_positions, lo
         'signals_published': len(signal_values),
         'skipped': skipped,
         'rebalanced': execute_rebalance,
+        'stale_blocked': stale_block,
+        'deployment': dep,
     }
 
 
@@ -1881,12 +2543,14 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
                 cur.execute("DELETE FROM consumption.strategies_signals_current WHERE strategy_id = %s", (strategy_id,))
                 cur.execute("DELETE FROM gold.paper_trade_skip_log WHERE strategy_id = %s", (strategy_id,))
                 cur.execute("DELETE FROM consumption.strategy_paper_skips_current WHERE strategy_id = %s", (strategy_id,))
+                cur.execute("DELETE FROM consumption.strategy_paper_deployment_current WHERE strategy_id = %s", (strategy_id,))
                 cur.execute("DELETE FROM gold.paper_pending_orders WHERE strategy_id = %s", (strategy_id,))
                 cur.execute("DELETE FROM consumption.strategy_paper_pending_current WHERE strategy_id = %s", (strategy_id,))
             else:
                 print("Backfill mode: clearing stale paper_trades_synthetic and strategies_signals_current")
                 cur.execute(SQL_TRUNCATE_STALE)
                 cur.execute("TRUNCATE TABLE gold.paper_trade_skip_log, consumption.strategy_paper_skips_current")
+                cur.execute("TRUNCATE TABLE consumption.strategy_paper_deployment_current")
                 cur.execute("TRUNCATE TABLE gold.paper_pending_orders, consumption.strategy_paper_pending_current")
 
         strategies = fetch_active_strategies(cur)
@@ -1927,6 +2591,10 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
         open_positions = fetch_open_positions(cur, strategy_ids)
         cap_overrides = fetch_cap_overrides(cur, strategy_ids)
         paper_designs = fetch_paper_designs(cur, strategy_ids)
+        rotation_screens = fetch_rotation_top_n(cur, strategy_ids)
+        for strategy in strategies:
+            if strategy['strategy_id'] in rotation_screens:
+                strategy['rotation_top_n'] = rotation_screens[strategy['strategy_id']]
         fill_conventions = fetch_fill_conventions(cur, strategy_ids)
         pend_open_map, pend_close_posids = fetch_pending_maps(cur, strategy_ids)
         rebalance_state = fetch_rebalance_state(cur, strategy_ids)
@@ -1944,6 +2612,7 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
         results = []
         gated_count = 0
         uat_failures = 0
+        stale_blocks = 0
         for strategy in strategies:
             sid = strategy['strategy_id']
             # Cap resolution (t_ee1ab601): the cap is never a silent global
@@ -1965,11 +2634,16 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
                 print(f"  {sid}: WARNING no paper_design row; concentration cap "
                       f"falls back to global default {eff_pct:.0%} (undeclared)")
 
+            if strategy.get('rotation_top_n'):
+                print(f"  {sid}: rotation screen top-{strategy['rotation_top_n']} "
+                      f"(gold.strategy_configs rotation_top_n; t_fdc57b21)")
+
             # Cadence gate (t_68b07c59): daily/event strategies always
             # execute; weekly/monthly strategies only mutate positions on
             # the first run of a new period (or under an explicit override).
             execute = True
             gate_reason = ''
+            stale_block = False
             if is_gated_frequency(strategy.get('frequency')):
                 freq = normalize_frequency(strategy['frequency'])
                 execute, period_key, gate_reason = decide_rebalance(
@@ -1981,9 +2655,35 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
                     cur.execute(SQL_SEED_REBALANCE_STATE, (sid, freq, period_key))
                     print(f"  {sid}: cadence gate seeded ({freq}, period {period_key})")
                 if execute:
+                    # Signal-staleness guard (t_6d1ddfe8), fail closed: a due
+                    # rebalance on an INGESTED strategy must not fire on a
+                    # signal file older than one cadence period (SUE 10-01
+                    # incident traded stale August targets). On stale: BLOCK,
+                    # hold the book, and DO NOT touch strategy_rebalance_state
+                    # — the period stays open so the rebalance auto re-fires
+                    # on a later run once a fresh file lands. backfill /
+                    # force-rebalance bypass (ops escape hatches).
+                    if (strategy.get('signal_mechanism') == 'ingested'
+                            and not backfill and not force_rebalance):
+                        market = infer_home_market(strategy.get('universe'))
+                        holidays = fetch_holidays(
+                            cur, market, today - timedelta(days=62), today)
+                        expected = prior_period_last_trading_day(freq, today, holidays)
+                        evidence = fetch_signal_evidence_date(cur, sid)
+                        fresh, detail = signal_freshness_verdict(evidence, expected)
+                        if not fresh:
+                            execute = False
+                            stale_block = True
+                            stale_blocks += 1
+                            gate_reason = (f"SIGNAL_STALE: {detail} "
+                                           f"(expected signal_date >= {expected}; "
+                                           f"home calendar {market})")
+                            print(f"  {sid}: ALERT SIGNAL_STALE — {gate_reason}; "
+                                  f"rebalance BLOCKED, period stays open")
+                if execute:
                     cur.execute(SQL_TOUCH_REBALANCE_STATE, (sid, freq, period_key, today))
                     print(f"  {sid}: REBALANCE DATE ({freq}: {gate_reason})")
-                else:
+                elif not stale_block:
                     gated_count += 1
 
             try:
@@ -1995,7 +2695,8 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
                                          convention=resolve_fill_convention(fill_conventions, sid),
                                          pend_open_tickers=pend_open_map.get(sid, frozenset()),
                                          pend_close_posids=pend_close_posids,
-                                         dry_run=dry_run)
+                                         dry_run=dry_run,
+                                         stale_block=stale_block)
             except PaperUatFireError as e:
                 # PAPER_UAT hard fail (t_b64f7302): the strategy does NOT fire
                 # this run and NOTHING falls back to the DB paper ledger.
@@ -2015,8 +2716,35 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
             results.append(res)
             refresh_pending_mirror(cur, sid)
             if sid in fill_conventions:
-                print(f"  {sid}: fill convention override "
-                      f"{fill_conventions[sid]} (gold.strategy_configs fill_convention)")
+                print(f"  {sid}: entry fill convention "
+                      f"{fill_conventions[sid]} (registry entry_fill_convention "
+                      f"declaration / strategy_configs override)")
+
+        # MANAGED RUNOFF flat transition (t_0daa8eaf): a retired PAPER book
+        # that is now fully flat (no open legs, nothing resting) has
+        # completed its runoff. Deactivate paper monitoring and log the
+        # archive event with the final exit details so qr_research can
+        # record the terminal state. Runs every cycle; idempotent.
+        cur.execute(SQL_FETCH_FLAT_RUNOFF_BOOKS)
+        for (flat_sid,) in cur.fetchall():
+            cur.execute(SQL_RUNOFF_EXIT_DETAILS, (flat_sid,))
+            exits = [
+                {'ticker': t, 'exit_date': str(d), 'exit_price': float(p) if p is not None else None,
+                 'exit_price_basis': b, 'pnl': float(pnl) if pnl is not None else None}
+                for (t, d, p, b, pnl) in cur.fetchall()
+            ]
+            cur.execute(SQL_DEACTIVATE_RUNOFF_MONITORING, (flat_sid,))
+            if cur.rowcount:
+                cur.execute(SQL_LOG_RUNOFF_FLAT_EVENT, (
+                    flat_sid,
+                    json.dumps({'kanban_task_id': 't_0daa8eaf',
+                                'runoff_completed': True,
+                                'exits': exits,
+                                'flat_as_of': str(today)}),
+                ))
+                print(f"  {flat_sid}: RUNOFF COMPLETE - book flat, paper "
+                      f"monitoring deactivated, archive event logged "
+                      f"(exits: {exits})")
 
         if not strategy_id:
             # Full run: drop current-skip rows for strategies no longer in the
@@ -2025,6 +2753,10 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
             cur.execute(SQL_DELETE_STALE_CURRENT_SKIPS, (strategy_ids,))
             if cur.rowcount:
                 print(f"  Removed {cur.rowcount} stale skip rows for strategies no longer active")
+            # Same hygiene for the deployment-ratio surface (t_33ffe715).
+            cur.execute(SQL_DELETE_STALE_DEPLOYMENT_CURRENT, (strategy_ids,))
+            if cur.rowcount:
+                print(f"  Removed {cur.rowcount} stale deployment rows for strategies no longer active")
             # Same hygiene for deferred orders: cancel resting orders of
             # strategies no longer active and drop their mirror rows.
             cur.execute(SQL_CANCEL_PENDING_INACTIVE, (strategy_ids,))
@@ -2041,18 +2773,29 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
         print("Rebalancer results:")
         for r in results:
             skipped_desc = [f"{s['ticker']}[{s['skip_kind']}]" for s in r.get('skipped', [])]
+            dep = r.get('deployment')
+            dep_txt = ""
+            if dep:
+                dep_txt = (f" deployed={dep['deployment_ratio']:.1%}of-target"
+                           if dep['deployment_ratio'] is not None
+                           else " deployed=n/a")
             print(f"  {r['strategy_id']}: closed={r['closed']} opened={r['opened']} "
                   f"booked_open={r.get('booked_open', 0)} booked_close={r.get('booked_close', 0)} "
                   f"signals={r['signals_published']} skipped={len(skipped_desc)}"
-                  f" rebalanced={'yes' if r.get('rebalanced', True) else 'NO (cadence gate)'}"
+                  f" rebalanced={'yes' if r.get('rebalanced', True) else ('NO (SIGNAL_STALE block)' if r.get('stale_blocked') else 'NO (cadence gate)')}"
+                  + dep_txt
                   + (" UAT_FIRE_FAILED" if r.get('uat_failed') else "")
                   + (f" ({', '.join(skipped_desc)})" if skipped_desc else ""))
         print(f"Total active strategies processed: {len(results)} "
               f"({gated_count} position-gated by cadence, signals still published)")
+        if stale_blocks:
+            print(f"SIGNAL_STALE blocks: {stale_blocks} (books held, periods "
+                  f"open — rebalances BLOCKED on stale signal files; "
+                  f"exiting non-zero).")
         if uat_failures:
             print(f"PAPER_UAT: {uat_failures} strateg(y/ies) FAILED to fire "
                   f"(hard fail, no DB-ledger fallback) — exiting non-zero.")
-        return uat_failures
+        return uat_failures + stale_blocks
 
     except Exception as e:
         conn.rollback()
