@@ -42,7 +42,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import pytz
 
@@ -59,6 +59,176 @@ HKT = pytz.timezone("Asia/Hong_Kong")
 
 def now_hkt() -> str:
     return datetime.now(HKT).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+# ── SUE input freshness gate (kanban t_4df7ec1d, 2026-11-02) ─────────────────
+# Fail-closed: a SUE-dependent ingested signal must not ship when the
+# gold.sue_scores vintage the engine consumed was stale at the pinned signal
+# date (2026-10-30 incident: signal generated 23:56Z used scores with
+# max(calculated_at)=2026-10-26 — earnings of 10-27..10-30 missing from the
+# month-end picks). The engine stamps the vintage it read into the file as
+# 'sue_scores_max_calculated_at'.
+#
+# Rule (per the task spec): vintage older than SUE_FRESHNESS_MAX_AGE_DAYS
+# calendar days at the pinned signal date -> BLOCK (write nothing for that
+# strategy, alert, exit non-zero so the signal cycle hard-fails).
+# Refinement so quiet earnings windows don't false-block: when the vintage is
+# old but (a) no fresher in-window score rows exist in gold.sue_scores AND
+# (b) bronze holds no served actuals missing from gold.sue_scores for the
+# pinned universe, the table is genuinely unchanged since the vintage — pass
+# with a NOTE. A block means one of the two coverage gaps is real.
+SUE_FRESHNESS_MAX_AGE_DAYS = 2
+SUE_ENGINE_WINDOW_DAYS = 63  # sig_s1_v2 pools report_date in (d-63d, d]
+
+
+class SueInputStale(Exception):
+    """Fail-closed: signal file was computed on a stale gold.sue_scores input."""
+
+
+def _parse_ts(value):
+    """Parse ISO / 'YYYY-MM-DD HH:MM:SS' timestamps; None when unparseable."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s == "unknown":
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _strategy_requires_sue(cur, strategy_id) -> bool:
+    """DB-backed marker: gold.strategy_configs config_key='requires_sue_scores'."""
+    cur.execute(
+        "SELECT config_value FROM gold.strategy_configs "
+        "WHERE strategy_id = %s AND config_key = 'requires_sue_scores'",
+        (strategy_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return False
+    v = row[0]
+    if isinstance(v, dict):
+        return bool(v.get("enabled", True))
+    return bool(v)
+
+
+def _record_sue_block(conn, strategy_id, file_meta, reason) -> None:
+    payload = {
+        "strategy_id": strategy_id,
+        "event": "sue_input_stale_block",
+        "reason": reason,
+        "sue_scores_max_calculated_at": file_meta.get("sue_scores_max_calculated_at"),
+        "signal_date": file_meta.get("signal_date"),
+        "data_asof": file_meta.get("data_asof"),
+        "generated_at": file_meta.get("generated_at"),
+        "blocked_at_hkt": now_hkt(),
+    }
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO gold.agent_events
+          (event_type, strategy_id, domain, agent_name, payload_json, status,
+           created_at, payload)
+        VALUES (%s, %s, %s, %s, %s::jsonb, %s, NOW(), %s::jsonb);
+        """,
+        ("signal_ingest_blocked", strategy_id, "etl", "etl-manager",
+         json.dumps(payload), "blocked", json.dumps(payload)),
+    )
+    conn.commit()
+
+
+def check_sue_input_freshness(conn, strategy_id, file_meta) -> None:
+    """Raise SueInputStale when the file's declared gold.sue_scores vintage is
+    stale at the pinned signal date. No-op when neither the file declares a
+    SUE vintage nor the strategy is marked requires_sue_scores."""
+    declared_raw = file_meta.get("sue_scores_max_calculated_at")
+    cur = conn.cursor()
+    requires = _strategy_requires_sue(cur, strategy_id)
+    if declared_raw is None and not requires:
+        return
+
+    pinned_ts = _parse_ts(file_meta.get("signal_date")
+                          or file_meta.get("data_asof")
+                          or file_meta.get("generated_at"))
+    vintage_ts = _parse_ts(declared_raw)
+
+    def _block(reason):
+        _record_sue_block(conn, strategy_id, file_meta, reason)
+        raise SueInputStale(reason)
+
+    if vintage_ts is None:
+        _block(f"strategy requires SUE input but the file declares no parseable "
+               f"sue_scores_max_calculated_at (got {declared_raw!r}) — cannot "
+               f"verify input freshness, failing closed")
+    if pinned_ts is None:
+        _block(f"cannot parse pinned signal date (signal_date/data_asof/"
+               f"generated_at all unparseable) — cannot evaluate SUE vintage "
+               f"{declared_raw!r}, failing closed")
+    assert vintage_ts is not None and pinned_ts is not None  # _block raises
+
+    age_days = (pinned_ts.date() - vintage_ts.date()).days
+    if age_days <= SUE_FRESHNESS_MAX_AGE_DAYS:
+        return
+
+    # Vintage is old. Distinguish a genuinely unchanged table (quiet earnings
+    # window — calculated_at only re-stamps on value change) from a real
+    # coverage gap. Both gap checks are scoped to the strategy's pinned
+    # universe and the engine's 63d report window.
+    cur.execute(
+        "SELECT universe_tickers FROM gold.strategy_registry WHERE strategy_id = %s",
+        (strategy_id,),
+    )
+    row = cur.fetchone()
+    universe = row[0] if row and row[0] else []
+    window_start = pinned_ts.date() - timedelta(days=SUE_ENGINE_WINDOW_DAYS)
+
+    # The engine declares the vintage second-truncated (e.g. from a str() of
+    # max(calculated_at)); rows stamped within the same second are the same
+    # table state the engine saw, not "fresher". Compare against the next
+    # whole second to avoid a sub-second false positive.
+    cur.execute(
+        """
+        SELECT count(*) FROM gold.sue_scores s
+        WHERE s.calculated_at >= date_trunc('second', %s::timestamp) + INTERVAL '1 second'
+          AND s.report_date > %s
+          AND s.report_date <= %s
+          AND (%s::text[] = '{}' OR s.ticker = ANY(%s))
+        """,
+        (vintage_ts, window_start, pinned_ts.date(), universe, universe),
+    )
+    fresher_scores = cur.fetchone()[0]
+
+    cur.execute(
+        """
+        SELECT count(*) FROM bronze.earnings_calendar b
+        WHERE b.eps_actual IS NOT NULL
+          AND b.earnings_date > %s
+          AND b.earnings_date <= %s
+          AND (%s::text[] = '{}' OR b.ticker = ANY(%s))
+          AND NOT EXISTS (
+              SELECT 1 FROM gold.sue_scores s
+              WHERE s.ticker = b.ticker AND s.report_date = b.earnings_date)
+        """,
+        (window_start, pinned_ts.date(), universe, universe),
+    )
+    unscored_actuals = cur.fetchone()[0]
+
+    if fresher_scores == 0 and unscored_actuals == 0:
+        print(f"{now_hkt()} ℹ️  {strategy_id}: sue_scores vintage "
+              f"{vintage_ts} is {age_days}d older than pinned {pinned_ts.date()}, "
+              f"but no fresher in-window scores and no unserved actuals exist "
+              f"— table genuinely unchanged, proceeding")
+        return
+
+    _block(f"sue_scores vintage {vintage_ts} is {age_days}d older than pinned "
+           f"signal date {pinned_ts.date()} (>{SUE_FRESHNESS_MAX_AGE_DAYS}d) AND "
+           f"coverage gap is real: {fresher_scores} fresher in-window score "
+           f"rows the engine did not see, {unscored_actuals} served actuals "
+           f"missing from gold.sue_scores. Run "
+           f"gold/equity/refresh_sue_chain_monthend.py and have the engine "
+           f"re-generate the signal before re-ingesting.")
 
 
 def load_signal_file(path: str) -> tuple:
@@ -167,9 +337,14 @@ def ensure_strategy_registry(conn, strategy_id, strategy_name, asset_class,
     print(f"{now_hkt()} ✅ {reg} updated for {strategy_id} (universe_tickers untouched)")
 
 
-def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, metrics=None):
+def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, metrics=None, signal_date=None):
     metrics = metrics or {}
     cur = conn.cursor()
+    # Test hook: sandbox copies point SCORES_TABLE_OVERRIDE at a scratch
+    # table (e.g. 'sandbox_x.strategy_ticker_scores'), same pattern as
+    # REGISTRY_TABLE_OVERRIDE in ensure_strategy_registry. Production never
+    # sets it.
+    scores_tbl = os.environ.get("SCORES_TABLE_OVERRIDE", "gold.strategy_ticker_scores")
     # Stamp provenance (migration 009) when the column exists, so these
     # file-ingested rows are distinguishable from computed ones. Guarded so
     # the same code runs on a pre-009 DB (column absent → omit it, DEFAULT
@@ -196,6 +371,11 @@ def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, 
             "weight": weight,
             "source_signal_file": signal_file,
             "generated_at": generated_at,
+            # t_6d1ddfe8: persist the file's own signal_date so the
+            # rebalancer's staleness guard can prefer it over computed_at
+            # (a regenerated OLD-period file must not look fresh from its
+            # new computed_at).
+            "signal_date": signal_date,
             "ingested_at": datetime.now(HKT).isoformat(),
         }
         meta = metrics.get(ticker)
@@ -248,8 +428,8 @@ def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, 
                  "PAPER", datetime.now(), datetime.now(), SIGNAL_INGESTED,
                  strengths.get(ticker), computed_at)
             )
-        sql = """
-        INSERT INTO gold.strategy_ticker_scores
+        sql = f"""
+        INSERT INTO {scores_tbl}
           (strategy_id, ticker, score, signal_action, entry_score, exit_score,
            criteria_met, position_status, deployed_at, updated_at, signal_source,
            signal_strength, computed_at)
@@ -274,8 +454,8 @@ def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, 
                 (strategy_id, ticker, score, action, entry_score, 0.0, crit(weight, ticker),
                  "PAPER", datetime.now(), datetime.now(), strengths.get(ticker), computed_at)
             )
-        sql = """
-        INSERT INTO gold.strategy_ticker_scores
+        sql = f"""
+        INSERT INTO {scores_tbl}
           (strategy_id, ticker, score, signal_action, entry_score, exit_score,
            criteria_met, position_status, deployed_at, updated_at, signal_strength,
            computed_at)
@@ -292,8 +472,49 @@ def upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, 
           updated_at      = EXCLUDED.updated_at;
         """
     cur.executemany(sql, rows)
+
+    # Replace-per-cycle semantics (t_3effb556): an ingested signal file is the
+    # COMPLETE active pick list for the strategy (registry
+    # signal_mechanism='ingested', exit_logic "per signal file"). The plain
+    # per-ticker upsert above never retires names absent from the current
+    # file, so stale BUY rows accumulated across file vintages (SUE 2026-11:
+    # 56 BUY rows = union of 4 vintages; the rotation screen ranked the
+    # contaminated union and booked a wrong rotation). Per the
+    # strategy-field-completeness contract — dropped universe members get
+    # SELL, never silently persist — retire every other BUY row for this
+    # strategy now:
+    #   score = 0, entry_score = 0, exit_score = the row's last score (>0 for
+    #   any real BUY row; preserves the retired weight as exit evidence),
+    #   computed_at = this file's compute stamp so the whole cycle reads with
+    #   one freshness vintage. Idempotent: re-ingesting the same file retires
+    #   nothing (the rows are already SELL).
+    retire_meta = json.dumps({
+        "retired_by_signal_file": signal_file,
+        "retired_at": datetime.now(HKT).isoformat(),
+        "retire_reason": ("replace-per-cycle: ticker absent from the current "
+                          "signal file's pick list (t_3effb556)"),
+    })
+    cur.execute(
+        f"""
+        UPDATE {scores_tbl}
+        SET signal_action = 'SELL',
+            score         = 0,
+            entry_score   = 0,
+            exit_score    = score,
+            computed_at   = %s,
+            updated_at    = NOW(),
+            criteria_met  = COALESCE(criteria_met, '{{}}'::jsonb) || %s::jsonb
+        WHERE strategy_id = %s
+          AND signal_action = 'BUY'
+          AND NOT (ticker = ANY(%s));
+        """,
+        (computed_at, retire_meta, strategy_id, list(weights.keys())),
+    )
+    retired = cur.rowcount
+
     conn.commit()
-    print(f"{now_hkt()} ✅ gold.strategy_ticker_scores upserted: {len(rows)} rows")
+    print(f"{now_hkt()} ✅ {scores_tbl} upserted: {len(rows)} rows; "
+          f"retired {retired} stale BUY row(s) to SELL (replace-per-cycle)")
 
 
 def insert_signal_logs(conn, strategy_id, signal_file, weights):
@@ -375,16 +596,22 @@ def is_strategy_ingest_enabled(conn, strategy_id):
 
 
 def ingest_one(conn, strategy_id, strategy_name, asset_class,
-               signal_file, generated_at, weights, metrics=None) -> None:
+               signal_file, generated_at, weights, metrics=None,
+               signal_date=None, file_meta=None) -> None:
     enabled, reason = is_strategy_ingest_enabled(conn, strategy_id)
     if not enabled:
         print(f"{now_hkt()} ⏸️  Skipping {strategy_id}: {reason}")
         return
+    # t_4df7ec1d: fail-closed SUE input freshness gate — raises SueInputStale
+    # (after writing a gold.agent_events audit row) BEFORE any write when the
+    # declared sue_scores vintage is stale at the pinned signal date.
+    check_sue_input_freshness(conn, strategy_id, file_meta or {})
     tickers = list(weights.keys())
     print(f"{now_hkt()} Ingesting {strategy_name} ({strategy_id}): {weights}")
     ensure_strategy_registry(conn, strategy_id, strategy_name, asset_class,
                              signal_file, tickers)
-    upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, metrics)
+    upsert_ticker_scores(conn, strategy_id, signal_file, generated_at, weights, metrics,
+                         signal_date=signal_date)
     insert_signal_logs(conn, strategy_id, signal_file, weights)
     record_agent_event(conn, strategy_id, strategy_name, signal_file,
                        generated_at, weights)
@@ -425,8 +652,13 @@ def _ingest_all_from_file(conn, signal_file, asset_class):
         if not weights:
             skipped.append((basename, "empty weights"))
             return n_ok, skipped
-        ingest_one(conn, sid, name, reg_asset_class or asset_class,
-                   signal_file, generated_at, weights, metrics)
+        try:
+            ingest_one(conn, sid, name, reg_asset_class or asset_class,
+                       signal_file, generated_at, weights, metrics,
+                       signal_date=data.get("signal_date"), file_meta=data)
+        except SueInputStale as e:
+            skipped.append((basename, f"SUE INPUT STALE — ingest BLOCKED: {e}"))
+            return n_ok, skipped
         n_ok += 1
         return n_ok, skipped
 
@@ -439,9 +671,31 @@ def _ingest_all_from_file(conn, signal_file, asset_class):
         if sid is None:
             skipped.append((name, "not in gold.strategy_registry"))
             continue
-        ingest_one(conn, sid, name, asset_class, signal_file, generated_at, weights, metrics)
+        try:
+            ingest_one(conn, sid, name, asset_class, signal_file, generated_at, weights, metrics,
+                       signal_date=data.get("signal_date"), file_meta=data)
+        except SueInputStale as e:
+            skipped.append((name, f"SUE INPUT STALE — ingest BLOCKED: {e}"))
+            continue
         n_ok += 1
     return n_ok, skipped
+
+
+def _reject_quarantined(path: str) -> None:
+    """t_eb58d0bc: refuse to ingest any file under a quarantine directory.
+
+    qr_research quarantines stale/superseded signal files into
+    workspace/quarantine_*/ (e.g. quarantine_stale_signals_2026-11-02).
+    The --signal-dir scanner never reaches them (top-level non-recursive
+    glob + exact '*_live_signals.json' suffix), but a manual --signal-file
+    or a --signal-dir pointed INTO the quarantine dir would. Fail closed.
+    """
+    parts = [c.lower() for c in os.path.normpath(os.path.abspath(path)).split(os.sep)]
+    if any(c.startswith('quarantine') for c in parts):
+        raise SystemExit(
+            f"REFUSED: {path} is inside a quarantine directory — "
+            "quarantined signal files are stale/superseded research artifacts "
+            "and must never be re-ingested (t_eb58d0bc).")
 
 
 def main() -> int:
@@ -465,6 +719,11 @@ def main() -> int:
                    help="Ingest every strategy in the file; ids resolved from "
                         "gold.strategy_registry by name, unknown names skipped")
     args = p.parse_args()
+
+    if args.signal_file:
+        _reject_quarantined(args.signal_file)
+    if args.signal_dir:
+        _reject_quarantined(args.signal_dir)
 
     conn = get_connection()
     total_ok, skipped = 0, []
@@ -499,12 +758,18 @@ def main() -> int:
         else:
             if not (args.strategy_id and args.strategy_name):
                 p.error("single-file mode needs --all, or both --strategy-id and --strategy-name")
-            generated_at, signals, _, metrics = load_signal_file(args.signal_file)
+            generated_at, signals, sdata, metrics = load_signal_file(args.signal_file)
             weights = signals.get(args.strategy_name) or {}
             if not weights:
                 raise SystemExit(f"No {args.strategy_name!r} signals in {args.signal_file}")
-            ingest_one(conn, args.strategy_id, args.strategy_name,
-                       args.asset_class, args.signal_file, generated_at, weights, metrics)
+            try:
+                ingest_one(conn, args.strategy_id, args.strategy_name,
+                           args.asset_class, args.signal_file, generated_at, weights, metrics,
+                           signal_date=sdata.get("signal_date"), file_meta=sdata)
+            except SueInputStale as e:
+                print(f"{now_hkt()} ❌ SUE INPUT STALE — ingest BLOCKED: {e}",
+                      file=sys.stderr)
+                return 1
             total_ok = 1
     finally:
         conn.close()
