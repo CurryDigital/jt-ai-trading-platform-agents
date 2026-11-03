@@ -123,9 +123,11 @@ class _StubCursor:
     def __init__(self):
         self.mutating = []
         self.connection = _StubConn()
+        self._last_head = ''
 
     def execute(self, sql, params=None):
         head = ' '.join(str(sql).split())[:40].upper()
+        self._last_head = head
         if head.startswith(('UPDATE GOLD.PAPER_TRADES', 'INSERT INTO GOLD.PAPER_TRADES_SYNTHETIC')):
             self.mutating.append(head)
         self.rowcount = 0
@@ -138,6 +140,10 @@ class _StubCursor:
         return []
 
     def fetchone(self):
+        # t_33ffe715: deployment writer reads open cost basis (scalar) and
+        # pending orders (fetchall -> []). Answer the scalar read with 0.
+        if self._last_head.startswith('SELECT COALESCE(SUM'):
+            return (0,)
         return None
 
 
