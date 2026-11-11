@@ -44,14 +44,22 @@ def test_real_registry_loads_clean():
 
 
 def test_real_registry_has_expected_real_strategies():
-    """The 7 real strategies must all be enabled (stub entries were removed
-    2026-07-10; their ids are in retired_ids)."""
+    """Current production contract: six real strategies enabled; id 1 disabled.
+
+    Strategy 1 was deliberately disabled on 2026-10-09 after the legacy audit
+    found its only recorded Sharpe was -0.73 and UNVERIFIED_NON_PIT. Keep the
+    entry for history/import validation, but fail CI if it is silently
+    re-enabled without a fresh strategy review.
+    """
     enabled = load_enabled_strategies()
     enabled_ids = sorted(e.id for e in enabled)
-    expected_real = [1, 2, 6, 11, 15, 16, 18]
-    assert enabled_ids == expected_real, (
-        f"expected {expected_real}, got {enabled_ids}."
+    expected_enabled = [2, 6, 11, 15, 16, 18]
+    assert enabled_ids == expected_enabled, (
+        f"expected {expected_enabled}, got {enabled_ids}."
     )
+
+    by_id = {e.id: e for e in load_registry()}
+    assert by_id[1].enabled is False
 
 
 def test_real_registry_tiers_match_folders():
