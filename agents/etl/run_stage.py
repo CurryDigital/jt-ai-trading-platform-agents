@@ -215,20 +215,20 @@ def main() -> int:
     if args.state_out:
         try:
             sys.path.insert(0, HERE)
-            from write_pipeline_state import decide_state
-            state = decide_state(
-                ok["bronze"], failed["bronze"], ok["silver"], failed["silver"],
-                ok["gold"], failed["gold"], ok["consumption"], failed["consumption"],
-            )
-            payload = {
-                "state": state,
+            from write_pipeline_state import build_payload
+            stages = {
+                stage: {"ok": ok[stage], "failed": failed[stage]}
+                for stage in VALID_STAGES
+            }
+            payload = build_payload(stages, extra={
+                "schema_version": 2,
                 "cadence": args.cadence,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "ok": ok, "failed": failed,
-            }
+            })
             with open(args.state_out, "w") as f:
-                json.dump(payload, f, indent=2)
-            print(f"state={state} written to {args.state_out}")
+                json.dump(payload, f, indent=2, sort_keys=True)
+            print(f"state={payload['state']} written to {args.state_out}")
         except Exception as e:
             print(f"⚠️ could not write state file: {e}")
 
