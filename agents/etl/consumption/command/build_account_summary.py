@@ -89,6 +89,18 @@ paper_assigned AS (
       AND r.assigned_capital IS NOT NULL
 ),
 live_positions AS (
+    -- t_53888693 (2026-11-10): the live book exposure must come from the
+    -- broker book ONLY (execution_mode='LIVE_TRADING', synced from
+    -- gold.ibkr_positions_live). Previously this filter was
+    -- `IS DISTINCT FROM 'PAPER_TRADING'`, which swept in MANUAL rows folded
+    -- from gold.manual_orders — and 100% of that table is paper_uat
+    -- reconciler fills on the same DUP825942 account. Result: the UAT mirror
+    -- was double-counted against the real shorts (gross 400.7% / net +51.0%
+    -- served for a book that is actually 3 shorts, gross/net ±164%).
+    -- Manual orders on this account are already reflected in the broker
+    -- positions, so including 'MANUAL' here would double-count even genuine
+    -- manual trades. The NULL-mode legacy row (araso_factor_model) is also
+    -- excluded from the live position count.
     SELECT
         COALESCE(SUM(ABS(market_value)), 0) AS gross_invested,
         COALESCE(SUM(market_value), 0) AS net_invested,
@@ -96,7 +108,7 @@ live_positions AS (
         COUNT(*)::integer AS open_positions
     FROM consumption.portfolio_positions_current
     WHERE status IN ('OPEN', 'ACTIVE')
-      AND execution_mode IS DISTINCT FROM 'PAPER_TRADING'
+      AND execution_mode = 'LIVE_TRADING'
 ),
 paper_positions AS (
     SELECT

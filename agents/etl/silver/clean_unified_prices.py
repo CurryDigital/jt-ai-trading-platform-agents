@@ -35,7 +35,7 @@ def _snapshot_id():
 def _ensure_snapshot_log(cur):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS gold.etl_snapshot_log (
-            snapshot_id text PRIMARY KEY,
+            snapshot_id text,
             scope text NOT NULL,
             script text NOT NULL,
             pre_rows bigint,
@@ -43,7 +43,8 @@ def _ensure_snapshot_log(cur):
             post_rows bigint,
             post_max_date date,
             note text,
-            created_at timestamptz NOT NULL DEFAULT now()
+            created_at timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (snapshot_id, scope)
         )
     """)
 
@@ -157,7 +158,25 @@ ON CONFLICT (ticker, date) DO UPDATE SET
     all_sources     = EXCLUDED.all_sources,
     asset_class     = EXCLUDED.asset_class,
     market          = EXCLUDED.market,
-    updated_at      = NOW();
+    updated_at      = NOW()
+-- 2026-10-26 (kanban t_c3327414): no-op restamp skip. The merge rewrites
+-- ~822k rows/run but <1% carry real changes; skipping identical rows avoids
+-- heap-update + WAL + audit-trigger cost for no-ops, and updated_at now
+-- means "last real change" (no consumer used it as a restamp freshness
+-- marker). Value-column set mirrors the PIT trigger's comparison.
+WHERE silver.unified_prices.asset_class    IS DISTINCT FROM EXCLUDED.asset_class
+   OR silver.unified_prices.market         IS DISTINCT FROM EXCLUDED.market
+   OR silver.unified_prices.open           IS DISTINCT FROM EXCLUDED.open
+   OR silver.unified_prices.high           IS DISTINCT FROM EXCLUDED.high
+   OR silver.unified_prices.low            IS DISTINCT FROM EXCLUDED.low
+   OR silver.unified_prices.close          IS DISTINCT FROM EXCLUDED.close
+   OR silver.unified_prices.volume         IS DISTINCT FROM EXCLUDED.volume
+   OR silver.unified_prices.adjusted_close IS DISTINCT FROM EXCLUDED.adjusted_close
+   OR silver.unified_prices.returns_1d     IS DISTINCT FROM EXCLUDED.returns_1d
+   OR silver.unified_prices.returns_log    IS DISTINCT FROM EXCLUDED.returns_log
+   OR silver.unified_prices.source         IS DISTINCT FROM EXCLUDED.source
+   OR silver.unified_prices.primary_source IS DISTINCT FROM EXCLUDED.primary_source
+   OR silver.unified_prices.all_sources    IS DISTINCT FROM EXCLUDED.all_sources;
 """
 
 def run():
@@ -172,6 +191,10 @@ def run():
     conn = get_connection()
     cur = conn.cursor()
     _ensure_snapshot_log(cur)
+    # PIT/audit integration (2026-10-26, kanban t_c3327414): stamp every
+    # audit/PIT row this merge produces with the snapshot id, so the
+    # silver.unified_prices_audit trail ties back to gold.etl_snapshot_log.
+    cur.execute("SELECT set_config('app.etl_source', %s, true)", (snapshot_id,))
     cur.execute("SELECT count(*), max(date) FROM silver.unified_prices")
     pre_rows, pre_max_date = cur.fetchone()
     print(f"snapshot_id={snapshot_id} pre_rows={pre_rows} pre_max_date={pre_max_date}")
@@ -258,7 +281,22 @@ def run():
             all_sources     = EXCLUDED.all_sources,
             asset_class     = EXCLUDED.asset_class,
             market          = EXCLUDED.market,
-            updated_at      = NOW();
+            updated_at      = NOW()
+        -- 2026-10-26 (kanban t_c3327414): no-op restamp skip (same rationale
+        -- and column set as the full merge path above).
+        WHERE silver.unified_prices.asset_class    IS DISTINCT FROM EXCLUDED.asset_class
+           OR silver.unified_prices.market         IS DISTINCT FROM EXCLUDED.market
+           OR silver.unified_prices.open           IS DISTINCT FROM EXCLUDED.open
+           OR silver.unified_prices.high           IS DISTINCT FROM EXCLUDED.high
+           OR silver.unified_prices.low            IS DISTINCT FROM EXCLUDED.low
+           OR silver.unified_prices.close          IS DISTINCT FROM EXCLUDED.close
+           OR silver.unified_prices.volume         IS DISTINCT FROM EXCLUDED.volume
+           OR silver.unified_prices.adjusted_close IS DISTINCT FROM EXCLUDED.adjusted_close
+           OR silver.unified_prices.returns_1d     IS DISTINCT FROM EXCLUDED.returns_1d
+           OR silver.unified_prices.returns_log    IS DISTINCT FROM EXCLUDED.returns_log
+           OR silver.unified_prices.source         IS DISTINCT FROM EXCLUDED.source
+           OR silver.unified_prices.primary_source IS DISTINCT FROM EXCLUDED.primary_source
+           OR silver.unified_prices.all_sources    IS DISTINCT FROM EXCLUDED.all_sources;
         """
         cur.execute(simple_sql)
     else:
@@ -299,7 +337,7 @@ def run():
         INSERT INTO gold.etl_snapshot_log
             (snapshot_id, scope, script, pre_rows, pre_max_date, post_rows, post_max_date, note)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (snapshot_id) DO UPDATE SET
+        ON CONFLICT (snapshot_id, scope) DO UPDATE SET
             post_rows = EXCLUDED.post_rows,
             post_max_date = EXCLUDED.post_max_date,
             note = EXCLUDED.note

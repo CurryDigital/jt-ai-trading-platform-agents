@@ -72,15 +72,30 @@ def trading_days(start: str, end: str) -> list:
     return days
 
 
-def already_loaded(conn, table: str, symbol: str, date_col: str, dates: list) -> set:
-    """Dates with rows under a SUCCESS run (skip for resume)."""
+def already_loaded(conn, table: str, symbol: str, date_col: str, dates: list,
+                   label: "str | None" = None) -> set:
+    """Dates with rows under a SUCCESS run (skip for resume).
+
+    label=None: credit from ANY SUCCESS run (default, legacy behavior).
+    label=<str>: credit only from SUCCESS runs whose request_params label
+    matches — used by supplemental DTE-band pulls so their resume set is
+    independent of the primary 7-60 band's credit."""
     cur = conn.cursor()
-    cur.execute(
-        f"""SELECT DISTINCT r.{date_col} FROM {table} r
-            JOIN bronze.thetadata_ingest_runs run USING (ingest_run_id)
-            WHERE r.symbol = %s AND run.status = 'SUCCESS'
-              AND r.{date_col} = ANY(%s::date[])""",
-        (symbol, dates))
+    if label is None:
+        cur.execute(
+            f"""SELECT DISTINCT r.{date_col} FROM {table} r
+                JOIN bronze.thetadata_ingest_runs run USING (ingest_run_id)
+                WHERE r.symbol = %s AND run.status = 'SUCCESS'
+                  AND r.{date_col} = ANY(%s::date[])""",
+            (symbol, dates))
+    else:
+        cur.execute(
+            f"""SELECT DISTINCT r.{date_col} FROM {table} r
+                JOIN bronze.thetadata_ingest_runs run USING (ingest_run_id)
+                WHERE r.symbol = %s AND run.status = 'SUCCESS'
+                  AND run.request_params->>'label' = %s
+                  AND r.{date_col} = ANY(%s::date[])""",
+            (symbol, label, dates))
     out = {row[0].isoformat() for row in cur.fetchall()}
     cur.close()
     return out
@@ -253,6 +268,16 @@ def main():
     ap.add_argument('--reverify-days', type=int, default=0,
                     help='re-fetch the N most recent SUCCESS-credited dates '
                          '(vendor revision watch; revisions land as new run rows)')
+    ap.add_argument('--no-gate', action='store_true',
+                    help='skip the completeness gate entirely (no verdicts '
+                         'recorded). For supplemental DTE-band pulls whose '
+                         'row counts are not comparable to the primary band '
+                         'baseline — recording SHORT there would corrupt '
+                         'silver.thetadata_date_completeness.')
+    ap.add_argument('--skip-same-label-only', action='store_true',
+                    help='resume credit only from SUCCESS runs with the same '
+                         '--label (supplemental DTE-band pulls); default '
+                         'credits dates from ANY SUCCESS run.')
     args = ap.parse_args()
 
     endpoints = [e.strip() for e in args.endpoints.split(',') if e.strip()]
@@ -277,8 +302,9 @@ def main():
             all_dates.extend(trading_days(s, e))
         all_dates = sorted(set(all_dates))
 
-        skip = set() if args.force else already_loaded(conn, table, args.symbol,
-                                                       date_col, all_dates)
+        skip = set() if args.force else already_loaded(
+            conn, table, args.symbol, date_col, all_dates,
+            label=args.label if args.skip_same_label_only else None)
         todo = [d for d in all_dates if d not in skip]
 
         # revision watch: re-fetch the N most recent SUCCESS-credited dates
@@ -316,7 +342,7 @@ def main():
         fetched = inserted = 0
         status, error = 'SUCCESS', None
         short_dates = []
-        gate_enabled = ep in ('eod', 'greeks', 'oi')  # option endpoints only
+        gate_enabled = ep in ('eod', 'greeks', 'oi') and not args.no_gate
         try:
             for d in todo:
                 try:

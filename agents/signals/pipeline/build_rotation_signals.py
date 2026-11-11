@@ -1486,11 +1486,26 @@ def main():
     cur = conn.cursor()
 
     # fetch all paper strategies that we have configs for:
-    # paused (disable_paper_rebuild=TRUE) or already computed (keep book consistent)
+    # paused (disable_paper_rebuild=TRUE) or already computed (keep book consistent).
+    # MANAGED RUNOFF (t_0daa8eaf): a retired computed strategy with open
+    # paper legs or resting orders keeps getting daily scores so the
+    # rebalancer can manage each leg to its rule-consistent exit. The
+    # EXISTS clauses make this self-terminating: once flat with nothing
+    # resting, scoring stops and the book is fully archived (no new
+    # entries are possible — the rebalancer suppresses them with
+    # RUNOFF_NO_ENTRY skips).
     cur.execute("""SELECT strategy_id, universe_tickers, frequency, execution_mode
-                   FROM gold.strategy_registry
-                   WHERE status = 'paper'
-                     AND (disable_paper_rebuild = TRUE OR signal_mechanism = 'computed')
+                   FROM gold.strategy_registry r
+                   WHERE (status = 'paper'
+                          AND (disable_paper_rebuild = TRUE OR signal_mechanism = 'computed'))
+                      OR (status = 'retired'
+                          AND signal_mechanism = 'computed'
+                          AND (EXISTS (SELECT 1 FROM gold.paper_trades_synthetic p
+                                       WHERE p.strategy_id = r.strategy_id
+                                         AND p.status = 'open')
+                               OR EXISTS (SELECT 1 FROM gold.paper_pending_orders o
+                                          WHERE o.strategy_id = r.strategy_id
+                                            AND o.status = 'pending')))
                    ORDER BY strategy_id""")
     strategies = cur.fetchall()
     if only is not None:

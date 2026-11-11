@@ -33,7 +33,6 @@ load_dotenv(os.path.expanduser('~/.hermes/profiles/qr_etl/env/etl.env'), overrid
 RATE_SERIES = [('DTB3', '3-Month Treasury Bill Rate', 'pct'),
                ('VIXCLS', 'CBOE Volatility Index: VIX', 'index')]
 RATE_START = '2023-05-01'
-DIV_UNDERLYING = 'SPY'
 DIV_START = dt.date(2023, 1, 1)  # margin before window for TTM yield checks
 
 
@@ -75,7 +74,7 @@ def backfill_rates(conn, series_id, indicator_name, units, obs) -> tuple:
     return n, len(obs)
 
 
-def backfill_dividends(conn, divs) -> tuple:
+def backfill_dividends(conn, underlying, divs) -> tuple:
     cur = conn.cursor()
     n = 0
     for _, d in sorted(divs.items()):
@@ -85,13 +84,19 @@ def backfill_dividends(conn, divs) -> tuple:
                (underlying, ex_date, amount, source)
                VALUES (%s,%s,%s,'YAHOO_CHART_API')
                ON CONFLICT (underlying, ex_date, source) DO NOTHING""",
-            (DIV_UNDERLYING, ex, round(float(d['amount']), 6)))
+            (underlying, ex, round(float(d['amount']), 6)))
         n += cur.rowcount
     conn.commit()
     return n, len(divs)
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--underlying', default='SPY',
+                    help='dividend underlying to backfill (default SPY)')
+    args = ap.parse_args()
+    div_underlying = args.underlying.upper()
     key = os.environ.get('FRED_API_KEY')
     if not key:
         sys.exit('FRED_API_KEY not in environment')
@@ -107,7 +112,7 @@ def main():
     probe = db.get_connection()
     pcur = probe.cursor()
     pcur.execute("""SELECT count(*) FROM deriv.underlying_dividends
-                    WHERE underlying=%s""", (DIV_UNDERLYING,))
+                    WHERE underlying=%s""", (div_underlying,))
     div_count = pcur.fetchone()[0]
     pcur.close()
     probe.close()
@@ -115,29 +120,29 @@ def main():
     if div_count == 0:
         p1 = int(dt.datetime.combine(DIV_START, dt.time(0, 0)).timestamp())
         p2 = int(dt.datetime.now().timestamp())
-        div_url = (f'https://query1.finance.yahoo.com/v8/finance/chart/{DIV_UNDERLYING}'
+        div_url = (f'https://query1.finance.yahoo.com/v8/finance/chart/{div_underlying}'
                    f'?period1={p1}&period2={p2}&interval=1d&events=div')
         divs = ((fetch_json(div_url, user_agent='Mozilla/5.0 (X11; Linux x86_64) '
                             'AppleWebKit/537.36 (KHTML, like Gecko) '
                             'Chrome/126.0 Safari/537.36')
                  ['chart']['result'][0].get('events') or {}).get('dividends', {}))
     else:
-        print(f'DIVS {DIV_UNDERLYING}: already populated ({div_count} rows), skipping fetch')
+        print(f'DIVS {div_underlying}: already populated ({div_count} rows), skipping fetch')
 
     conn = db.get_connection()
     for sid, name, units in RATE_SERIES:
         ins_r, tot_r = backfill_rates(conn, sid, name, units, series_obs[sid])
         print(f'RATES {sid}: fetched={tot_r} inserted={ins_r}')
-    ins_d, tot_d = backfill_dividends(conn, divs)
-    print(f'DIVS {DIV_UNDERLYING}: fetched={tot_d} inserted={ins_d}')
+    ins_d, tot_d = backfill_dividends(conn, div_underlying, divs)
+    print(f'DIVS {div_underlying}: fetched={tot_d} inserted={ins_d}')
     cur = conn.cursor()
     for sid, _, _ in RATE_SERIES:
         cur.execute("""SELECT min(date), max(date), count(*) FROM bronze.fred_macro_indicators
                        WHERE series_id=%s""", (sid,))
         print(f'{sid} coverage now:', cur.fetchone())
     cur.execute("""SELECT min(ex_date), max(ex_date), count(*) FROM deriv.underlying_dividends
-                   WHERE underlying=%s""", (DIV_UNDERLYING,))
-    print('SPY div coverage now:', cur.fetchone())
+                   WHERE underlying=%s""", (div_underlying,))
+    print(f'{div_underlying} div coverage now:', cur.fetchone())
     conn.close()
 
 

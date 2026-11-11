@@ -107,6 +107,10 @@ manual_agg AS (
     -- order for the same ticker (GLD buy+sell from the paper_uat reconciler)
     -- produced duplicate (strategy_id, ticker) keys -> CardinalityViolation.
     -- Net to ONE row per ticker (BUY + / SELL -); skip flat tickers.
+    -- 2026-11-10 (t_53888693): exclude book='paper_uat'. The UAT reconciler
+    -- logs its DUP825942 mirror fills into gold.manual_orders; folding them
+    -- in as 'MANUAL' live positions double-counted the UAT book against the
+    -- real broker positions in consumption.account_summary (400% gross bug).
     SELECT
         'MANUAL' AS strategy_id,
         ticker,
@@ -139,6 +143,7 @@ manual_agg AS (
             MIN(created_at) AS created_at
         FROM gold.manual_orders
         WHERE status IN ('accepted', 'open', 'filled')
+          AND book IS DISTINCT FROM 'paper_uat'  -- t_53888693: UAT reconciler fills are not live manual positions
         GROUP BY ticker
         HAVING SUM(CASE WHEN side = 'SELL' THEN -qty ELSE qty END) <> 0
     ) n

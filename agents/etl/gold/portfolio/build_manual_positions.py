@@ -35,6 +35,10 @@ WITH netted AS (
         MIN(created_at) AS created_at
     FROM gold.manual_orders
     WHERE status IN ('accepted', 'open', 'filled')
+      -- t_53888693 (2026-11-10): paper_uat reconciler fills logged to
+      -- gold.manual_orders are NOT live manual positions; folding them in
+      -- double-counted the UAT mirror against the real broker book.
+      AND book IS DISTINCT FROM 'paper_uat'
     GROUP BY ticker
     HAVING SUM(CASE WHEN side = 'SELL' THEN -qty ELSE qty END) <> 0
 )

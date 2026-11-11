@@ -30,14 +30,14 @@ from db import get_connection
 
 
 def latest_price(cur, ticker, on_or_before):
-    """Return the latest close price <= on_or_before for ticker."""
+    """Return (price_date, close) of the latest close <= on_or_before."""
     cur.execute("""
-        SELECT close FROM silver.unified_prices
+        SELECT date, close FROM silver.unified_prices
         WHERE ticker = %s AND date <= %s
         ORDER BY date DESC LIMIT 1
     """, (ticker, on_or_before))
     row = cur.fetchone()
-    return float(row[0]) if row else None
+    return (row[0], float(row[1])) if row else (None, None)
 
 
 def backfill_strategy(conn, strategy_id, force=False):
@@ -105,13 +105,13 @@ def backfill_strategy(conn, strategy_id, force=False):
             exit_date = None
             status = 'open'
 
-        entry_price = latest_price(cur, ticker, entry_date)
-        exit_price = latest_price(cur, ticker, exit_date) if exit_date else latest_price(cur, ticker, datetime.now(timezone.utc).date())
+        entry_src_date, entry_price = latest_price(cur, ticker, entry_date)
+        exit_src_date, exit_price = latest_price(cur, ticker, exit_date) if exit_date else latest_price(cur, ticker, datetime.now(timezone.utc).date())
         if entry_price is None:
             print(f"  ⚠️ {ticker}: no price for entry {entry_date}; skipping")
             continue
         if exit_price is None:
-            exit_price = entry_price
+            exit_src_date, exit_price = entry_src_date, entry_price
 
         # Weight proportional to entry score among BUY tickers on that date
         same_day_buys = [(d, s) for d, a, s in by_ticker[ticker] if a == 'BUY' and d == entry_date]
@@ -138,6 +138,8 @@ def backfill_strategy(conn, strategy_id, force=False):
             'exit_date': exit_date,
             'entry_price': entry_price,
             'exit_price': exit_price,
+            'entry_src_date': entry_src_date,
+            'exit_src_date': exit_src_date,
             'shares': shares,
             'weight': round(weight * 100, 4),
             'status': status,
@@ -157,16 +159,25 @@ def backfill_strategy(conn, strategy_id, force=False):
             pnl_pct = ((t['exit_price'] - t['entry_price']) / t['entry_price']) * 100 if t['entry_price'] else 0
         values.append((
             strategy_id, t['ticker'], 'LONG', t['entry_date'], t['entry_price'], t['exit_date'], t['exit_price'], t['shares'],
-            t['status'], t['weight'], capital, pnl, pnl_pct
+            t['status'], t['weight'], capital, pnl, pnl_pct,
+            # Fill basis (t_716fe5a7): this writer prices fills at the
+            # latest close <= the signal/exit date — SIGNAL_CLOSE semantics.
+            # Stamp source dates so the basis is recoverable per row.
+            t['entry_src_date'], 'SIGNAL_CLOSE',
+            t['exit_src_date'] if t['status'] == 'closed' else None,
+            'SIGNAL_CLOSE' if t['status'] == 'closed' else None,
         ))
 
     if values:
         execute_values(cur, """
             INSERT INTO gold.paper_trades_synthetic
               (strategy_id, ticker, direction, entry_date, entry_price, exit_date, exit_price, n_shares, status,
-               signal_weight, assigned_capital, pnl, pnl_pct, created_at, updated_at)
+               signal_weight, assigned_capital, pnl, pnl_pct,
+               entry_price_source_date, entry_price_basis,
+               exit_price_source_date, exit_price_basis,
+               created_at, updated_at)
             VALUES %s
-        """, values, template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())")
+        """, values, template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())")
 
     conn.commit()
     cur.close()

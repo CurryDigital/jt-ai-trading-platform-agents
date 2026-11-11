@@ -74,9 +74,17 @@ FROM gold.strategy_registry r
 JOIN gold.strategy_paper_monitoring m
   ON m.strategy_id = r.strategy_id AND m.is_active = true
 WHERE r.execution_mode = 'PAPER'
-  AND r.status = 'paper'
-  AND r.retired_at IS NULL
   AND r.max_drawdown_oos IS NOT NULL
+  AND (
+    (r.status = 'paper' AND r.retired_at IS NULL)
+    OR
+    -- MANAGED RUNOFF (t_0daa8eaf): a retired book with open paper legs
+    -- keeps kill-switch/MDD coverage until the runoff completes (the
+    -- rebalancer's flat sweep deactivates monitoring once fully flat).
+    (r.retired_at IS NOT NULL
+     AND EXISTS (SELECT 1 FROM gold.paper_trades_synthetic p
+                 WHERE p.strategy_id = r.strategy_id AND p.status = 'open'))
+  )
 ORDER BY r.strategy_id;
 """
 

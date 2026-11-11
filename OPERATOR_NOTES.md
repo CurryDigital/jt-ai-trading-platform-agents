@@ -538,3 +538,54 @@ check.
 old. The signal cycle gates on `gold_layer_state`, but a per-run assert
 ("kpis max(date) within N trading days, else refuse to score") would stop
 stale-data signals at the last line of defense too.
+
+---
+
+## Known data limitations
+
+### PIT snapshot history gap — silver.unified_ipo_* and silver.unified_prices (noted 2026-10-27, qr_research)
+`silver.unified_ipo_calendar_pit` / `unified_ipo_performance_pit` /
+`unified_ipo_grey_market_pit` and `silver.unified_prices_pit` were seeded
+from CURRENT table state at PIT enable time (see `silver.unified_ipo_pit_meta`).
+Any in-place restatement that occurred BEFORE the seed is unrecoverable —
+there is no pre-seed restatement history. Consequence: backtests whose inputs
+span the pre-seed era carry residual restatement risk and must be labeled
+`UNVERIFIED_NON_PIT` for their pre-seed inputs even when read through the PIT
+tables (worked case: 3636.HK full price history restated after 2026-09-22,
+invalidating the published 18-trade C1 backtest). Only post-enable snapshots
+are genuinely point-in-time.
+
+### Options open interest 0% populated (noted 2026-10-27, qr_research, DERIV-0)
+`silver.option_eod_quotes.open_interest` is NULL/0 on 100% of rows (SPY/QQQ/
+SPX/XLE, all dates 2023-06→today). The ThetaData free tier does not supply OI
+and the loader stores nothing. Consequence: NO liquidity/positioning filter
+(OI floors, OI-weighted strikes, put/call OI ratios) is possible on in-house
+options studies until fixed; do not spec OI-conditioned variants on this data.
+
+### skew_25d_30d dead in gold.option_vol_features_daily (noted 2026-10-27, qr_research, DERIV-0)
+`skew_25d_30d` is 0/2559 populated (atm_iv_30d, iv_rank_1y, vrp_30d, mfiv_30
+are populated normally). Any skew-conditioned vol work must compute 25-delta
+skew directly from silver.option_eod_greeks until the feature job is fixed.
+
+### SPX greeks model simplification (noted 2026-10-27, qr_research, DERIV-1 infra; UPGRADED TO BLOCKER 2026-10-28, operator directive)
+SPX computed greeks use CRR_EUROPEAN_V1 (no discrete dividend yield — index
+dividends are not in deriv.underlying_dividends for SPX). Observed bias: SPX
+30d ATM IV ~2-4.5 vol pts BELOW ^VIX on the same date (e.g. 2026-10-23:
+14.97 vs 19.45).
+SEVERITY (2026-10-28): this is a BLOCKER for any absolute IV-vs-realized
+(VRP-timing) signal — not a caveat. The fix (SPX dividend-yield escrow input,
+e.g. deriv.underlying_dividends populated for SPX or a declared constant-yield
+assumption) is MANDATORY at the promotion gate for any Tier-2 variant whose
+entry/exit uses absolute IV levels (IV rank/percentile vs history, IV-vs-VIX,
+IV-vs-realized spreads). Cross-sectional-only uses (relative IV comparisons
+across strikes/expiries within the same SPX snapshot) may proceed as logged.
+
+### HK delisting gap in silver.unified_prices (measured 2026-10-28, qr_research, E1-HK data gate)
+Of 867 HK tickers trading in 2020-Q1, only 8 have series ending before
+2026-06 — the panel retains almost no 2020-2023 delistings (expected
+~hundreds). Consequence: any HK cross-sectional backtest on this panel is
+survivorship-biased UPWARD for long books. Free reconstruction does not
+work: yfinance purges delisted HK (0/4 incl. 3333.HK Evergrande), East
+Money host rate-limits this IP, webb-site dbpub is gone, hkexnews has no
+machine-readable delisted roster. E1-HK BLOCKED at its frozen data gate
+(workspace/e1hk_data_verdict_2026-10-28.md).

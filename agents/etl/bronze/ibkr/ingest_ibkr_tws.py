@@ -22,7 +22,12 @@ IBKR_CLIENT_ID = int(os.environ.get('IBKR_CLIENT_ID', 99))
 # rate — used only to label rows and select the BASE aggregate.
 IBKR_BASE_CCY = os.environ.get('IBKR_BASE_CCY', 'HKD').upper()
 
-ACCOUNT_TAGS = ('CashBalance', 'NetLiquidation', 'AvailableFunds',
+# t_a39ce608 (2026-11-10): the accountValues stream NEVER delivers a
+# 'CashBalance' tag — cash arrives as '$LEDGER-CashBalance' per currency
+# (HKD/USD/BASE) plus 'TotalCashValue'. ExchangeRate likewise arrives ONLY as
+# '$LEDGER-ExchangeRate'. Verified via live gateway probe (clientId 93).
+ACCOUNT_TAGS = ('CashBalance', '$LEDGER-CashBalance', 'TotalCashValue',
+                'NetLiquidation', 'AvailableFunds',
                 'BuyingPower', 'EquityWithLoanValue')
 
 async def fetch_positions_and_summary():
@@ -97,7 +102,9 @@ async def fetch_positions_and_summary():
             if av.tag in ACCOUNT_TAGS:
                 key = f"{av.tag}_{av.currency}" if av.currency else av.tag
                 summary[key] = av.value
-            elif av.tag == 'ExchangeRate' and av.currency:
+            elif av.tag in ('ExchangeRate', '$LEDGER-ExchangeRate') and av.currency:
+                if av.currency.upper() in ('BASE', IBKR_BASE_CCY):
+                    continue  # identity rate rows — no conversion content
                 try:
                     fx_rates[av.currency.upper()] = float(av.value)
                 except (TypeError, ValueError):
@@ -224,8 +231,13 @@ def write_account_summary(summary, fx_rates, positions_count):
                    "an unlabeled account summary")
             print(f"❌ {msg}")
             raise SystemExit(2)
-        cash_hkd = _num(summary.get('CashBalance_HKD')) or 0
-        cash_usd = _num(summary.get('CashBalance_USD')) or 0
+        # Cash: 'CashBalance' is never delivered by accountValues; real cash
+        # keys are $LEDGER-CashBalance_<ccy> (fallback TotalCashValue_<ccy>).
+        cash_hkd = (_num(summary.get('$LEDGER-CashBalance_HKD'))
+                    or _num(summary.get('CashBalance_HKD'))
+                    or _num(summary.get('TotalCashValue_HKD')) or 0)
+        cash_usd = (_num(summary.get('$LEDGER-CashBalance_USD'))
+                    or _num(summary.get('CashBalance_USD')) or 0)
         available = _num(summary.get(f'AvailableFunds_{IBKR_BASE_CCY}'))
         if available is None:
             available = _num(summary.get('AvailableFunds_BASE')) or 0

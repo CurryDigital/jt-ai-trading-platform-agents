@@ -150,7 +150,10 @@ def compute_target_positions(config, universe, prices) -> Dict[str, Any]:
         total_notional = sum(p["notional"] for p in positions if p.get("notional"))
 
     leverage = total_notional / assigned_capital if assigned_capital > 0 else 0.0
-    max_exposure = max((p["notional"] / total_notional for p in positions if p.get("notional")), default=0.0)
+    # Exposure measured against total_capital (cap basis), not deployed
+    # notional — whole-share flooring otherwise inflates the ratio and
+    # spuriously trips the gate (same bug class as multi-asset 2026-11-02).
+    max_exposure = max((p["notional"] / total_capital for p in positions if p.get("notional") and total_capital > 0), default=0.0)
 
     gate_reasons = []
     if leverage > max_leverage + 1e-6:

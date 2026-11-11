@@ -141,7 +141,7 @@ def main():
         INSERT INTO gold.etl_snapshot_log
             (snapshot_id, scope, script, pre_rows, post_rows, note)
         VALUES (%s,%s,%s,%s,%s,%s)
-        ON CONFLICT (snapshot_id) DO UPDATE SET
+        ON CONFLICT (snapshot_id, scope) DO UPDATE SET
             post_rows = EXCLUDED.post_rows, note = EXCLUDED.note""",
         (args.snapshot_id, "silver orphan reconcile (no deletes)",
          "silver/reconcile_unified_prices_bronze.py",

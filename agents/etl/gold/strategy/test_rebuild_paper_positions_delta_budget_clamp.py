@@ -92,6 +92,31 @@ class TestClampNewOpens(unittest.TestCase):
         self.assertEqual(by_ticker, {'PEND': 900, 'NEW': 100})
         self.assertEqual(skips, [])  # NEW right-sized to remaining 1,000
 
+    def test_pending_open_debits_booked_not_target(self):
+        # t_3effb556: a resting OPEN booked at a CLAMPED size (300 shares)
+        # smaller than today's freshly computed target (900) must debit the
+        # budget by its BOOKED 300 x $10 = 3,000 — what settle will actually
+        # deploy — not the 9,000 target. Debiting the target would gate NEW
+        # at 1,000 remaining instead of the honest 7,000.
+        targets = [tgt('PEND', 900, 10.0), tgt('NEW', 700, 10.0)]
+        clamped, skips = clamp_new_opens(
+            targets, set(), 0.0, 10_000.0, {},
+            pend_open_tickers={'PEND': 300.0})
+        by_ticker = {t['ticker']: t['shares'] for t in clamped}
+        self.assertEqual(by_ticker, {'PEND': 900, 'NEW': 700})
+        self.assertEqual(skips, [])
+
+    def test_pending_open_null_booked_falls_back_to_target(self):
+        # Defensive: unknown booked size (None) debits the target size —
+        # the conservative legacy behaviour.
+        targets = [tgt('PEND', 900, 10.0), tgt('NEW', 500, 10.0)]
+        clamped, skips = clamp_new_opens(
+            targets, set(), 0.0, 10_000.0, {},
+            pend_open_tickers={'PEND': None})
+        by_ticker = {t['ticker']: t['shares'] for t in clamped}
+        self.assertEqual(by_ticker, {'PEND': 900, 'NEW': 100})
+        self.assertEqual(skips, [])
+
     def test_cn_lowvol_repro(self):
         # cn_stk_lowvol_12 repro: retained 92,736 of 100k; new 000001.SZ
         # (CN lot 100 @ 11.54) gets 600 shares, 600519.SS (lot 100 @

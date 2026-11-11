@@ -274,7 +274,11 @@ def compute_target_positions(config, thresholds, universe, prices, vols, weights
         total_notional = sum(p["notional"] for p in positions if p.get("notional"))
 
     leverage = total_notional / assigned_capital if assigned_capital > 0 else 0.0
-    max_exposure = max((p["notional"] / total_notional for p in positions if p.get("notional")), default=0.0)
+    # Measure single-asset exposure against total_capital (the basis the cap is
+    # applied to), NOT deployed notional: whole-share flooring leaves leverage
+    # < 1, so notional/total_notional inflates exposure and spuriously trips
+    # the gate (seen 2026-11-02: DBC capped to 0.70 read as 0.7062).
+    max_exposure = max((p["notional"] / total_capital for p in positions if p.get("notional") and total_capital > 0), default=0.0)
 
     gate_reasons = []
     if leverage > max_leverage + 1e-6:

@@ -193,7 +193,7 @@ def main():
                 (snapshot_id, scope, script, pre_rows, pre_max_date,
                  post_rows, post_max_date, note)
             VALUES (%s, %s, %s, %s, NULL, %s, NULL, %s)
-            ON CONFLICT (snapshot_id) DO UPDATE SET
+            ON CONFLICT (snapshot_id, scope) DO UPDATE SET
                 post_rows = EXCLUDED.post_rows, note = EXCLUDED.note""",
             (args.snapshot_id,
              "phantom quarantine (gold.daily_ohlcv NULLs, silver phantoms, SPY junk)",

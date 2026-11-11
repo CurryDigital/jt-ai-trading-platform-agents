@@ -14,6 +14,11 @@ Sources unioned (all already exist):
                                    approved_at → severity 'warning', tag 'APPROVAL'
   3. DATA staleness            ← gold.source_freshness where a source is
                                    overdue (staleness > expected)  → severity by lateness
+  4. EXPOSURE (live book)      ← consumption.account_summary live row when
+                                   |gross_exp_pct| >= 100  → 'risk_live_exposure'
+                                   (single source of truth = the same view the
+                                   API serves; replaces the static 2026-07-04
+                                   'live_exposure_near_cap' seed — t_53888693)
 
 Each source maps to the frontend's structured shape:
     severity ∈ {critical, warning, info}
@@ -117,6 +122,42 @@ WHERE vf.freshness_status = 'stale'
 ON CONFLICT (item_id) DO NOTHING;
 """
 
+# 4. Live-book exposure vs equity — DERIVED from consumption.account_summary
+#    (t_53888693, 2026-11-10). Replaces the static 2026-07-04 seed row
+#    'live_exposure_near_cap' whose hardcoded "61% / cash 39%" text never
+#    matched the served account numbers. Single source of truth: the same
+#    view /api/command/overview reads, so the attention item can never drift
+#    from the account panel again. Cash is intentionally not quoted — the
+#    bronze IBKR cash ingest currently reports 0 (separate gap).
+INSERT_EXPOSURE_SQL = """
+INSERT INTO gold.attention_items
+    (item_id, severity, tag, title, impact, target, ref_id, created_at)
+SELECT
+    'risk_live_exposure'                                   AS item_id,
+    CASE WHEN s.gross_exp_pct >= 200 THEN 'critical'
+         ELSE 'warning' END                                AS severity,
+    'EXPOSURE'                                             AS tag,
+    'Live gross exposure at '
+        || ROUND(s.gross_exp_pct, 1) || '%'                AS title,
+    'Gross ' || ROUND(s.gross_exp_pct, 1)
+        || '% · net ' || ROUND(s.net_exp_pct, 1)
+        || '% of equity across ' || s.positions
+        || ' open position(s); review sizing before adding risk.'
+                                                           AS impact,
+    'command'                                              AS target,
+    NULL                                                   AS ref_id,
+    NOW()                                                  AS created_at
+FROM consumption.account_summary s
+WHERE s.book = 'live'
+  AND s.equity > 0
+  AND ABS(s.gross_exp_pct) >= 100   -- leveraged/short beyond equity
+ON CONFLICT (item_id) DO UPDATE SET
+    severity   = EXCLUDED.severity,
+    title      = EXCLUDED.title,
+    impact     = EXCLUDED.impact,
+    created_at = EXCLUDED.created_at;
+"""
+
 
 def build() -> int:
     conn = get_connection()
@@ -130,6 +171,7 @@ def build() -> int:
                 ('risk', INSERT_RISK_SQL),
                 ('approval', INSERT_APPROVAL_SQL),
                 ('data', INSERT_DATA_SQL),
+                ('exposure', INSERT_EXPOSURE_SQL),
             ):
                 try:
                     cur.execute(sql)

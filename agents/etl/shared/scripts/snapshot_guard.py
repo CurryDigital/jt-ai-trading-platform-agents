@@ -40,7 +40,7 @@ def require_snapshot_id(scope, script):
 def log_snapshot(cur, snapshot_id, scope, script, pre_rows, post_rows, note=""):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS gold.etl_snapshot_log (
-            snapshot_id text PRIMARY KEY,
+            snapshot_id text,
             scope text NOT NULL,
             script text NOT NULL,
             pre_rows bigint,
@@ -48,12 +48,13 @@ def log_snapshot(cur, snapshot_id, scope, script, pre_rows, post_rows, note=""):
             post_rows bigint,
             post_max_date date,
             note text,
-            created_at timestamptz NOT NULL DEFAULT now()
+            created_at timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (snapshot_id, scope)
         )""")
     cur.execute("""
         INSERT INTO gold.etl_snapshot_log
             (snapshot_id, scope, script, pre_rows, post_rows, note)
         VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (snapshot_id) DO UPDATE SET
+        ON CONFLICT (snapshot_id, scope) DO UPDATE SET
             post_rows = EXCLUDED.post_rows, note = EXCLUDED.note""",
         (snapshot_id, scope, script, pre_rows, post_rows, note))

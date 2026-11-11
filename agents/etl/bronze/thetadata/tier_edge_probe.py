@@ -29,7 +29,7 @@ os.environ.setdefault("AWS_REGION", "ap-southeast-1")
 import db
 from theta_client import ThetaClient, TierGated, MarketClosed
 
-SYMBOLS = ("SPY", "XLE")
+SYMBOLS = ("SPY", "XLE", "QQQ")  # QQQ added 2026-10-26 (Track B backfill, kanban t_8d75977e)
 
 
 def main():

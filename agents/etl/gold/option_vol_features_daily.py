@@ -49,7 +49,7 @@ from collections import defaultdict
 sys.path.insert(0, "/home/ubuntu/.hermes/profiles/qr_etl/home/trading-platform/agents/etl/shared/scripts")
 import db  # noqa: E402
 
-UNDERLYINGS_DEFAULT = ["SPY", "XLE"]
+UNDERLYINGS_DEFAULT = ["SPY", "XLE", "QQQ"]  # QQQ added 2026-10-26 (kanban t_8d75977e)
 TARGET_DTE = 30
 MIN_DTE, MAX_DTE = 7, 60
 RANK_WINDOW = 252

@@ -14,12 +14,17 @@ For recycled tickers the price window for an earlier listing is capped at the
 next listing_date of the same ticker, so returns never cross into the successor
 company's price history (2026-08-30, kanban t_3ad38fa3).
 
-Full-rebuild semantics: the in-scope slice (HK tickers, listing_date >=
-2015-01-01) is DELETEd and re-inserted on every run, inside one transaction.
-Upsert-only rebuilds left stale rows behind whenever a listing stopped
-qualifying (e.g. recycled-ticker first listings with zero price bars in their
-capped window kept successor-price rows written before the cap fix —
-kanban t_3791b6f2: 2451.HK/2023-10-12, 2545.HK/2024-07-03).
+Full-rebuild semantics (revised 2026-10-26, kanban t_fd164803): rows are
+upserted first, then in-scope rows (HK tickers, listing_date >= 2015-01-01)
+whose (ticker, listing_date) did NOT come back from the rebuild are deleted,
+inside one transaction. This purge-only-stale flow has the same final-state
+semantics as the old blanket DELETE+reinsert but produces zero audit churn
+on unchanged rows — every DELETE/UPDATE in silver.unified_ipo_audit now
+represents a REAL restatement, not a nightly rewrite. (Upsert-only rebuilds
+left stale rows behind whenever a listing stopped qualifying — e.g.
+recycled-ticker first listings with zero price bars in their capped window
+kept successor-price rows written before the cap fix — kanban t_3791b6f2:
+2451.HK/2023-10-12, 2545.HK/2024-07-03.)
 """
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared', 'scripts'))
@@ -30,13 +35,12 @@ from db import get_connection
 def run():
     conn = get_connection()
     cur = conn.cursor()
-    # Full rebuild of the in-scope slice (same transaction as the inserts
-    # below): purges rows for listings that no longer qualify.
     cur.execute("""
-        DELETE FROM silver.unified_ipo_performance
-        WHERE ticker LIKE '%%.HK' AND listing_date >= '2015-01-01'
+        CREATE TEMP TABLE _perf_keep (
+            ticker varchar, listing_date date,
+            PRIMARY KEY (ticker, listing_date)
+        ) ON COMMIT DROP
     """)
-    n_deleted = cur.rowcount
     cur.execute("""
         SELECT ticker, listing_date, offer_price
         FROM silver.unified_ipo_calendar
@@ -95,6 +99,8 @@ def run():
         r20d = (c20 / base - 1) if (base and c20) else None
         r1m = (c1m / base - 1) if (base and c1m) else None
         r3m = (c3m / base - 1) if (base and c3m) else None
+        cur.execute("INSERT INTO _perf_keep (ticker, listing_date) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                    (ticker, ldate))
         cur.execute("""
             INSERT INTO silver.unified_ipo_performance
                 (ticker, listing_date, offer_price, first_day_date, first_day_open,
@@ -119,6 +125,19 @@ def run():
               int(float(fd_v)) if fd_v is not None else None,
               r1d, r10d, r20d, r1m, r3m))
         n_ok += 1
+    # purge-only-stale: delete in-scope rows that did NOT come back from the
+    # rebuild (same final-state semantics as the old blanket DELETE+reinsert,
+    # but unchanged rows are untouched -> zero audit churn; every DELETE/UPDATE
+    # in silver.unified_ipo_audit is a REAL restatement).
+    cur.execute("""
+        DELETE FROM silver.unified_ipo_performance p
+        WHERE p.ticker LIKE '%%.HK' AND p.listing_date >= '2015-01-01'
+          AND NOT EXISTS (
+              SELECT 1 FROM _perf_keep k
+              WHERE k.ticker = p.ticker AND k.listing_date = p.listing_date
+          )
+    """)
+    n_deleted = cur.rowcount
     conn.commit()
     cur.execute("""SELECT count(*), count(return_1d), count(return_10d),
                           count(return_20d), count(return_1m), count(return_3m)

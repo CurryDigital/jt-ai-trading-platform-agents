@@ -24,6 +24,8 @@ All 8 requested views were successfully created in the `gold` schema. No existin
 | `gold.v_paper_trade_history` | Section D closed trade history | 2 | ✅ |
 | `gold.v_paper_trade_summary` | Summary row above trade history | 1 | ✅ |
 
+> **2026-11-03 repoint (t_60df42bb):** both views were redefined off the orphaned legacy ledger `gold.paper_trades` (frozen 2026-08-05) onto the canonical ledger `gold.paper_trades_synthetic` × `strategy_registry` `execution_mode='PAPER'`, CASH + CLEANSE-1 non-strategy legs excluded, 30-day window on `exit_date`. Migration: `migrations/2026-11-03_v_paper_trade_history_repoint.sql`. Columns without a synthetic-ledger equivalent (`instrument`, `contracts`, `regime`, `ic_at_entry`) are now NULL.
+
 ### Strategy + Agent Views (3 views)
 
 | View | Purpose | Rows | Status |
