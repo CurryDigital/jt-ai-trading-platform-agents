@@ -18,12 +18,14 @@ import sys
 import tempfile
 import subprocess
 import json
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ETL = os.path.normpath(os.path.join(HERE, ".."))
 sys.path.insert(0, ETL)
 
-from write_pipeline_state import decide_state, parse_list
+import run_stage
+from write_pipeline_state import build_payload, decide_state, parse_list
 
 
 def test_all_ok_is_ready():
@@ -94,6 +96,88 @@ def test_cli_writes_valid_json():
         assert payload['sources_ok'] == ['yf', 'binance', 'equity_kpis']
         assert payload['sources_failed'] == [{'stage': 'bronze', 'source': 'ibkr'}]
         assert payload['stage_counts']['bronze']['ok'] == 2
+
+
+def test_state_payload_extras_cannot_override_sync_contract():
+    stages = {
+        'bronze': {'ok': ['yf'], 'failed': []},
+        'silver': {'ok': ['clean'], 'failed': []},
+        'gold': {'ok': ['equity_kpis'], 'failed': []},
+        'consumption': {'ok': ['command'], 'failed': []},
+    }
+    try:
+        build_payload(stages, extra={'state': 'failed'})
+    except ValueError as e:
+        assert 'state' in str(e)
+    else:
+        raise AssertionError('runner metadata must not override synchronizer contract fields')
+
+
+def test_run_stage_state_matches_sync_contract():
+    """run_stage writes the same contract that sync_gold_layer_state consumes."""
+    manifest = {
+        'stages_order': list(run_stage.VALID_STAGES),
+        'steps': [
+            {'name': 'bronze_ok', 'stage': 'bronze', 'cadence': 'daily',
+             'script': 'unused.py', 'timeout': 1},
+            {'name': 'bronze_bad', 'stage': 'bronze', 'cadence': 'daily',
+             'script': 'unused.py', 'timeout': 1},
+            {'name': 'silver_ok', 'stage': 'silver', 'cadence': 'daily',
+             'script': 'unused.py', 'timeout': 1},
+            {'name': 'gold_ok', 'stage': 'gold', 'cadence': 'daily',
+             'script': 'unused.py', 'timeout': 1},
+            {'name': 'consumption_ok', 'stage': 'consumption', 'cadence': 'daily',
+             'script': 'unused.py', 'timeout': 1},
+        ],
+    }
+    outcomes = {
+        'bronze_ok': True,
+        'bronze_bad': False,
+        'silver_ok': True,
+        'gold_ok': True,
+        'consumption_ok': True,
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest_path = os.path.join(tmp, 'manifest.json')
+        out = os.path.join(tmp, '.state.json')
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest, f)
+
+        argv = sys.argv
+        sys.argv = [
+            'run_stage.py', '--cadence', 'daily',
+            '--manifest', manifest_path, '--state-out', out,
+        ]
+        try:
+            with patch.object(
+                run_stage, 'run_step',
+                side_effect=lambda step, dry_run: outcomes[step['name']],
+            ):
+                rc = run_stage.main()
+        finally:
+            sys.argv = argv
+
+        assert rc == 1
+        with open(out) as f:
+            payload = json.load(f)
+
+    assert payload['state'] == 'partial'
+    assert payload['sources_ok'] == [
+        'bronze_ok', 'silver_ok', 'gold_ok', 'consumption_ok'
+    ]
+    assert payload['sources_failed'] == [
+        {'stage': 'bronze', 'source': 'bronze_bad'}
+    ]
+    assert payload['completed_at']
+    assert payload['stage_counts'] == {
+        'bronze': {'ok': 1, 'failed': 1},
+        'silver': {'ok': 1, 'failed': 0},
+        'gold': {'ok': 1, 'failed': 0},
+        'consumption': {'ok': 1, 'failed': 0},
+    }
+    assert payload['cadence'] == 'daily'
+    assert payload['schema_version'] == 2
 
 
 def _main():
