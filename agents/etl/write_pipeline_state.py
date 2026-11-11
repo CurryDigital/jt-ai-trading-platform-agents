@@ -79,29 +79,19 @@ def decide_state(
     return 'partial' if any_failed else 'ready'
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
-    ap.add_argument('--output', default='.state.json',
-                    help='Path to write the state JSON (default: .state.json)')
-    for stage in ('bronze', 'silver', 'gold', 'consumption'):
-        ap.add_argument(f'--{stage}-ok', default='',
-                        help=f'Comma-separated {stage} sources that succeeded')
-        ap.add_argument(f'--{stage}-failed', default='',
-                        help=f'Comma-separated {stage} sources that failed')
-    args = ap.parse_args()
+def build_payload(stages: dict[str, dict[str, list[str]]],
+                  extra: dict | None = None) -> dict:
+    """Build the .state.json payload consumed by sync_gold_layer_state.py.
 
-    stages = {
-        s: {
-            'ok':     parse_list(getattr(args, f'{s}_ok')),
-            'failed': parse_list(getattr(args, f'{s}_failed')),
-        }
-        for s in ('bronze', 'silver', 'gold', 'consumption')
-    }
-
+    Keep this as the single payload builder so run_stage.py and the CLI cannot
+    drift into incompatible state schemas. `extra` is additive only: callers
+    may attach cadence/runner metadata, but must not replace the synchronizer
+    contract fields built here.
+    """
     state = decide_state(
-        stages['bronze']['ok'],     stages['bronze']['failed'],
-        stages['silver']['ok'],     stages['silver']['failed'],
-        stages['gold']['ok'],       stages['gold']['failed'],
+        stages['bronze']['ok'],      stages['bronze']['failed'],
+        stages['silver']['ok'],      stages['silver']['failed'],
+        stages['gold']['ok'],        stages['gold']['failed'],
         stages['consumption']['ok'], stages['consumption']['failed'],
     )
 
@@ -123,12 +113,43 @@ def main() -> int:
             for stage, r in stages.items()
         },
     }
+    if extra:
+        contract_fields = set(payload)
+        overrides = contract_fields.intersection(extra)
+        if overrides:
+            raise ValueError(
+                f"state payload extras cannot override contract fields: {sorted(overrides)}"
+            )
+        payload.update(extra)
+    return payload
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
+    ap.add_argument('--output', default='.state.json',
+                    help='Path to write the state JSON (default: .state.json)')
+    for stage in ('bronze', 'silver', 'gold', 'consumption'):
+        ap.add_argument(f'--{stage}-ok', default='',
+                        help=f'Comma-separated {stage} sources that succeeded')
+        ap.add_argument(f'--{stage}-failed', default='',
+                        help=f'Comma-separated {stage} sources that failed')
+    args = ap.parse_args()
+
+    stages = {
+        s: {
+            'ok':     parse_list(getattr(args, f'{s}_ok')),
+            'failed': parse_list(getattr(args, f'{s}_failed')),
+        }
+        for s in ('bronze', 'silver', 'gold', 'consumption')
+    }
+
+    payload = build_payload(stages)
 
     out_path = os.path.abspath(args.output)
     with open(out_path, 'w') as f:
         json.dump(payload, f, indent=2, sort_keys=True)
 
-    print(f"Pipeline state: {state}  "
+    print(f"Pipeline state: {payload['state']}  "
           f"(bronze ok={len(stages['bronze']['ok'])}/failed={len(stages['bronze']['failed'])}, "
           f"silver ok={len(stages['silver']['ok'])}/failed={len(stages['silver']['failed'])}, "
           f"gold ok={len(stages['gold']['ok'])}/failed={len(stages['gold']['failed'])}, "
