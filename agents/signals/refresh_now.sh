@@ -53,29 +53,16 @@ export PYTHONPATH="${ETL_SHARED}:${SIGNALS_DIR}:${PYTHONPATH:-}"
 export AWS_REGION="${AWS_REGION:-ap-southeast-1}"
 
 # ── Gold-layer gate ───────────────────────────────────────────────────────
+# Same fail-closed helper as the cron path. --force is the only bypass.
 if [ "${FORCE}" -eq 0 ]; then
-    GOLD_STATE=$("${PYTHON}" -c "
-import sys
-sys.path.insert(0, '${ETL_SHARED}')
-try:
-    from db import get_connection
-    conn = get_connection()
-    with conn.cursor() as cur:
-        cur.execute('SELECT state FROM openclaw_researcher.gold_layer_state WHERE id=1')
-        row = cur.fetchone()
-    conn.close()
-    print(row[0] if row else 'unknown')
-except Exception:
-    print('unknown')
-" 2>/dev/null || echo unknown)
-    case "${GOLD_STATE}" in
-        failed|locked|stale)
-            echo "⏸ gold layer state=${GOLD_STATE} — refusing to compute signals from bad data."
-            echo "  Run the ETL refresh first, or re-run with --force if you accept the risk."
-            exit 1
-            ;;
-        *) echo "gold_layer_state=${GOLD_STATE} — proceeding" ;;
-    esac
+    GOLD_GATE_OUTPUT=$("${PYTHON}" "${SIGNALS_DIR}/check_gold_layer_gate.py")
+    GOLD_GATE_EXIT=$?
+    if [ ${GOLD_GATE_EXIT} -ne 0 ]; then
+        echo "⏸ ${GOLD_GATE_OUTPUT} — refusing to compute signals from unsafe data."
+        echo "  Run the ETL refresh first, or re-run with --force if you accept the risk."
+        exit 75
+    fi
+    echo "✅ ${GOLD_GATE_OUTPUT} — proceeding"
 fi
 
 cd "${SIGNALS_DIR}"
