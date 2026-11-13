@@ -212,6 +212,7 @@ def main() -> int:
                   + (f"  [{', '.join(failed[s])}]" if failed[s] else ""))
     print("=" * 60)
 
+    state_write_failed = False
     if args.state_out:
         try:
             sys.path.insert(0, HERE)
@@ -230,9 +231,10 @@ def main() -> int:
                 json.dump(payload, f, indent=2, sort_keys=True)
             print(f"state={payload['state']} written to {args.state_out}")
         except Exception as e:
+            state_write_failed = True
             print(f"⚠️ could not write state file: {e}")
 
-    return 1 if n_failed else 0
+    return 1 if n_failed or state_write_failed else 0
 
 
 if __name__ == "__main__":

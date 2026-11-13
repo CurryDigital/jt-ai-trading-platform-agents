@@ -49,37 +49,16 @@ export PYTHONPATH="${ETL_SHARED}:${SIGNALS_DIR}:${PYTHONPATH:-}"
 export AWS_REGION="${AWS_REGION:-ap-southeast-1}"
 
 # ── Gate on gold-layer freshness ──────────────────────────────────────────
-# If ETL marked state='failed' or 'locked', writing signals would be writing
-# nonsense. Exit cleanly so cron monitoring doesn't false-alarm.
-GOLD_STATE=$("${PYTHON}" -c "
-import sys
-sys.path.insert(0, '${ETL_SHARED}')
-try:
-    from db import get_connection
-    conn = get_connection()
-    with conn.cursor() as cur:
-        cur.execute('SELECT state FROM openclaw_researcher.gold_layer_state WHERE id=1')
-        row = cur.fetchone()
-    conn.close()
-    print(row[0] if row else 'unknown')
-except Exception as e:
-    print(f'error:{e}', file=sys.stderr)
-    print('unknown')
-" 2>/dev/null || echo unknown)
-
-echo "gold_layer_state.state = ${GOLD_STATE}"
-case "${GOLD_STATE}" in
-    ready|partial)
-        echo "✅ gold layer ok — proceeding"
-        ;;
-    failed|locked|stale)
-        echo "⏸ gold layer not ready (state=${GOLD_STATE}) — skipping signal cycle"
-        exit 0
-        ;;
-    *)
-        echo "⚠️ gold layer state unknown (state=${GOLD_STATE}) — proceeding cautiously"
-        ;;
-esac
+# Fail closed unless the synchronized state is ready/partial and refreshed_at
+# is within GOLD_MAX_AGE_HOURS (default 30h). Unknown state, query errors,
+# missing timestamps, and stale timestamps are all unsafe for signal writes.
+GOLD_GATE_OUTPUT=$("${PYTHON}" "${SIGNALS_DIR}/check_gold_layer_gate.py")
+GOLD_GATE_EXIT=$?
+if [ ${GOLD_GATE_EXIT} -ne 0 ]; then
+    echo "⏸ ${GOLD_GATE_OUTPUT} — refusing signal cycle"
+    exit 75
+fi
+echo "✅ ${GOLD_GATE_OUTPUT} — proceeding"
 
 # ── Run the signal generation ─────────────────────────────────────────────
 cd "${SIGNALS_DIR}"

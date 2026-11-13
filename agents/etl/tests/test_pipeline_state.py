@@ -180,6 +180,57 @@ def test_run_stage_state_matches_sync_contract():
     assert payload['schema_version'] == 2
 
 
+def test_run_stage_state_write_failure_is_fatal():
+    """A requested state file must be written even when all steps pass."""
+    manifest = {
+        'stages_order': list(run_stage.VALID_STAGES),
+        'steps': [
+            {'name': f'{stage}_ok', 'stage': stage, 'cadence': 'daily',
+             'script': 'unused.py', 'timeout': 1}
+            for stage in run_stage.VALID_STAGES
+        ],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest_path = os.path.join(tmp, 'manifest.json')
+        # The parent directory intentionally does not exist.
+        out = os.path.join(tmp, 'missing-parent', '.state.json')
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest, f)
+
+        argv = sys.argv
+        sys.argv = [
+            'run_stage.py', '--cadence', 'daily',
+            '--manifest', manifest_path, '--state-out', out,
+        ]
+        try:
+            with patch.object(run_stage, 'run_step', return_value=True):
+                rc = run_stage.main()
+        finally:
+            sys.argv = argv
+
+        assert rc == 1
+        assert not os.path.exists(out)
+
+
+def test_refresh_wrappers_make_state_sync_failure_fatal():
+    """Scheduler wrappers must not hide sync failure or wrap status to zero."""
+    agents = os.path.normpath(os.path.join(ETL, '..'))
+    wrappers = (
+        os.path.join(agents, 'etl', 'daily_refresh.sh'),
+        os.path.join(agents, 'etl', 'hourly_refresh.sh'),
+    )
+    for wrapper in wrappers:
+        with open(wrapper) as f:
+            source = f.read()
+        assert 'rm -f .state.json' in source
+        assert 'SYNC_STATE_EXIT=$?' in source
+        assert '[ ${SYNC_STATE_EXIT} -eq 0 ] || TOTAL_FAILS=$((TOTAL_FAILS + 1))' in source
+        assert 'exit ${TOTAL_FAILS}' not in source
+        assert 'exit 1' in source
+        assert 'exit 0' in source
+
+
 def _main():
     fns = [v for k, v in globals().items() if k.startswith("test_") and callable(v)]
     failures = 0
