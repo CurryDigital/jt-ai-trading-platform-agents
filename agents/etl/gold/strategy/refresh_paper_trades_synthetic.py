@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-Refresh gold.paper_trades_synthetic from consumption.signal_logs.
+Refresh historical-replay rows in gold.paper_trades_synthetic from
+consumption.signal_logs.
 
-This backfills synthetic paper trades for approved pipeline strategies
-that are not yet wired to the real paper execution agent. Run after the
-daily signal ingestion completes.
+This backfills reconstructed trades for approved pipeline strategies that are
+not yet wired to the forward paper execution engine. Run after daily signal
+ingestion completes. Rows are explicitly stamped evidence_class=
+'historical_replay'; Paper surfaces must consume only 'forward_paper' rows
+written by rebuild_paper_positions.py.
 
 APPEND-ONLY WRITER CONTRACT (t_1b373785, 2026-10-26; spec:
 paper_feeder_append_only_spec.md attached to t_47a76ea3)
@@ -108,6 +111,9 @@ SELECT
   (SELECT count(*) FROM information_schema.columns
    WHERE table_schema='gold' AND table_name='paper_trades_synthetic'
      AND column_name IN ('run_id','first_seen_at','exit_run_id','exit_updated_at')) AS cols,
+  (SELECT count(*) FROM information_schema.columns
+   WHERE table_schema='gold' AND table_name='paper_trades_synthetic'
+     AND column_name = 'evidence_class') AS evidence_col,
   (SELECT count(*) FROM pg_indexes
    WHERE schemaname='gold' AND tablename='paper_trades_synthetic'
      AND indexname='uniq_pts_strategy_ticker_entry') AS ident_idx,
@@ -369,11 +375,11 @@ def sql_upsert_closed(table):
 INSERT INTO {table}
     (strategy_id, ticker, direction, entry_date, exit_date, entry_price, exit_price,
      n_shares, pnl, pnl_pct, status, signal_weight, assigned_capital,
-     run_id, first_seen_at, exit_run_id, exit_updated_at, updated_at)
+     run_id, first_seen_at, exit_run_id, exit_updated_at, evidence_class, updated_at)
 SELECT
     strategy_id, ticker, direction, entry_date, exit_date, entry_price, exit_price,
     n_shares, pnl, pnl_pct, status, signal_weight, assigned_capital,
-    %(run_id)s, now(), %(run_id)s, now(), now()
+    %(run_id)s, now(), %(run_id)s, now(), 'historical_replay', now()
 FROM _cand_closed
 ON CONFLICT (strategy_id, ticker, entry_date) DO UPDATE SET
     exit_date       = EXCLUDED.exit_date,
@@ -399,11 +405,11 @@ def sql_upsert_open(table):
 INSERT INTO {table}
     (strategy_id, ticker, direction, entry_date, exit_date, entry_price, exit_price,
      n_shares, pnl, pnl_pct, status, signal_weight, assigned_capital,
-     run_id, first_seen_at, exit_run_id, exit_updated_at, updated_at)
+     run_id, first_seen_at, exit_run_id, exit_updated_at, evidence_class, updated_at)
 SELECT
     strategy_id, ticker, direction, entry_date, exit_date, entry_price, exit_price,
     n_shares, pnl, pnl_pct, status, signal_weight, assigned_capital,
-    %(run_id)s, now(), NULL, NULL, now()
+    %(run_id)s, now(), NULL, NULL, 'historical_replay', now()
 FROM _cand_open
 ON CONFLICT (strategy_id, ticker, entry_date) DO UPDATE SET
     exit_date  = EXCLUDED.exit_date,
@@ -433,13 +439,15 @@ def refresh():
         c = conn.cursor()
 
         c.execute(SQL_SCHEMA_GUARD)
-        cols, ident_idx, audit_tbl = c.fetchone()
-        if cols != 4 or ident_idx != 1 or not audit_tbl:
+        cols, evidence_col, ident_idx, audit_tbl = c.fetchone()
+        if cols != 4 or evidence_col != 1 or ident_idx != 1 or not audit_tbl:
             raise RuntimeError(
-                "append-only schema not live "
-                f"(cols={cols}/4, uniq_pts_strategy_ticker_entry={ident_idx}, "
-                f"paper_feeder_runs={audit_tbl}); run migration "
-                "2026-10-26_paper_feeder_append_only.sql first")
+                "append-only/evidence schema not live "
+                f"(cols={cols}/4, evidence_class={evidence_col}, "
+                f"uniq_pts_strategy_ticker_entry={ident_idx}, "
+                f"paper_feeder_runs={audit_tbl}); run migrations "
+                "2026-10-26_paper_feeder_append_only.sql and "
+                "2026-11-13_paper_evidence_class.sql first")
 
         run_id = str(uuid.uuid4())
 
@@ -521,7 +529,7 @@ def refresh():
         print(f"run_id={run_id} considered={considered} inserted={inserted} "
               f"closed={rows_closed} marks={marks} orphaned={len(orphans)} "
               f"entry_mismatches={len(mismatches)}")
-        print("paper_trades_synthetic refreshed (append-only)")
+        print("historical replay ledger refreshed (append-only; evidence_class=historical_replay)")
     except Exception:
         conn.rollback()
         raise

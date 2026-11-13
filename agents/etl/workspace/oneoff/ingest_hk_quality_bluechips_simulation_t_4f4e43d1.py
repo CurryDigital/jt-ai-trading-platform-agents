@@ -156,7 +156,7 @@ def ingest():
         existing_cols = {r[0] for r in cur.fetchall()}
         required_cols = {"strategy_id", "ticker", "direction", "entry_date", "exit_date",
                          "entry_price", "exit_price", "n_shares", "pnl", "pnl_pct",
-                         "status", "signal_weight", "assigned_capital"}
+                         "status", "signal_weight", "assigned_capital", "evidence_class"}
         missing = required_cols - existing_cols
         if missing:
             raise RuntimeError(f"Missing required columns: {missing}")
@@ -182,8 +182,9 @@ def ingest():
             INSERT INTO gold.paper_trades_synthetic
               (strategy_id, ticker, direction, entry_date, exit_date, entry_price,
                exit_price, n_shares, pnl, pnl_pct, status, signal_weight, assigned_capital,
-               created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+               evidence_class, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'historical_replay', NOW(), NOW())
         """
         values = []
         for r in all_rows:

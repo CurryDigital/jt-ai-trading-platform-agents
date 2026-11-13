@@ -6,10 +6,11 @@ Kanban t_9579ff7c (2026-07-31): registry bookkeeping was write-once
 (promotion SQL set in_market_capital = assigned_capital) and never
 recomputed, so it contradicted the actual paper book.
 
-Source of truth: gold.paper_trades_synthetic (status='open').
-  - This is the engine book written by rebuild_paper_positions.py /
-    refresh_paper_trades_synthetic.py (round lots, capital-capped) and is
-    the same ledger that feeds consumption.portfolio_positions_current.
+Source of truth: gold.paper_trades_synthetic
+  (status='open', evidence_class='forward_paper').
+  - This is the forward engine book written by rebuild_paper_positions.py;
+    historical_replay rows from refresh_paper_trades_synthetic.py are research
+    evidence only and never count as deployed Paper capital.
   - gold.paper_trades is NOT used: its writer (refresh_paper_trades.py)
     is orphaned (not in the signal cycle or pipeline manifest), its rows
     are stale, and it carries NULL n_shares artifacts when signal_criteria
@@ -47,6 +48,7 @@ deployed AS (
     SELECT strategy_id, SUM(n_shares * entry_price) AS in_market
     FROM gold.paper_trades_synthetic
     WHERE status = 'open'
+      AND evidence_class = 'forward_paper'
       AND strategy_id IN (SELECT strategy_id FROM monitored)
     GROUP BY strategy_id
 ),

@@ -318,7 +318,7 @@ CREATE TABLE IF NOT EXISTS gold.strategy_rebalance_state (
 """
 
 SQL_FETCH_REBALANCE_STATE = """
-SELECT strategy_id, frequency, last_period_key, last_rebalance_date
+SELECT strategy_id, frequency, last_period_key, last_rebalance_date, seeded
 FROM gold.strategy_rebalance_state
 WHERE strategy_id = ANY(%s);
 """
@@ -340,6 +340,22 @@ ON CONFLICT (strategy_id) DO UPDATE SET
   last_rebalance_date = EXCLUDED.last_rebalance_date,
   seeded              = FALSE,
   updated_at          = NOW();
+"""
+
+SQL_RESTORE_REBALANCE_STATE = """
+INSERT INTO gold.strategy_rebalance_state
+  (strategy_id, frequency, last_period_key, last_rebalance_date, seeded, updated_at)
+VALUES (%s, %s, %s, %s, %s, NOW())
+ON CONFLICT (strategy_id) DO UPDATE SET
+  frequency           = EXCLUDED.frequency,
+  last_period_key     = EXCLUDED.last_period_key,
+  last_rebalance_date = EXCLUDED.last_rebalance_date,
+  seeded              = EXCLUDED.seeded,
+  updated_at          = NOW();
+"""
+
+SQL_DELETE_REBALANCE_STATE = """
+DELETE FROM gold.strategy_rebalance_state WHERE strategy_id = %s;
 """
 
 SQL_TRUNCATE_STALE = """
@@ -381,7 +397,7 @@ INSERT INTO gold.paper_trades_synthetic
   (strategy_id, ticker, direction, entry_date, entry_price, n_shares, status,
    signal_weight, assigned_capital, pnl, pnl_pct,
    entry_price_source_date, entry_price_basis, entry_cost, cost_bps_applied,
-   created_at, updated_at)
+   evidence_class, created_at, updated_at)
 VALUES %s;
 """
 
@@ -1057,17 +1073,30 @@ def settle_pending_orders(cur, today, strategy_ids, now_utc=None):
                 cur.execute(SQL_CANCEL_ORDER, (oid,))
                 print(f"  {sid}: CANCEL pending OPEN {ticker} - position already open")
                 continue
-            open_new_positions(cur, [(
+            opened_rows = open_new_positions(cur, [(
                 sid, ticker, bar_date, price, n_shares, weight, cap,
                 bar_date, basis, resolve_cost_bps(cur, sid, ticker)
             )])
+            if opened_rows != 1:
+                raise RuntimeError(
+                    f"pending OPEN {oid} for {sid}/{ticker} inserted "
+                    f"{opened_rows} position rows; refusing to mark filled")
             filled_open += 1
         else:
-            close_positions(cur, bar_date, [position_id], price,
-                            source_date=bar_date, basis=basis,
-                            cost_bps=resolve_cost_bps(cur, sid, ticker))
+            closed_rows = close_positions(cur, bar_date, [position_id], price,
+                                          source_date=bar_date, basis=basis,
+                                          cost_bps=resolve_cost_bps(cur, sid, ticker))
+            if closed_rows != 1:
+                raise RuntimeError(
+                    f"pending CLOSE {oid} for {sid}/{ticker} closed "
+                    f"{closed_rows} position rows (position_id={position_id}); "
+                    "refusing to mark filled")
             filled_close += 1
         cur.execute(SQL_MARK_ORDER_FILLED, (bar_date, price, oid))
+        if cur.rowcount != 1:
+            raise RuntimeError(
+                f"pending {kind} {oid} for {sid}/{ticker} marked "
+                f"{cur.rowcount} orders filled; expected exactly one")
         print(f"  {sid}: FILLED {kind} {ticker} @ {price} ({basis}, "
               f"bar {bar_date}, signal {signal_date})")
     return {'filled_open': filled_open, 'filled_close': filled_close,
@@ -1450,6 +1479,26 @@ def ensure_rebalance_state_table(cur):
     cur.execute(SQL_CREATE_REBALANCE_STATE_TABLE)
 
 
+def restore_rebalance_state(cur, sid, prior_state):
+    """Undo this run's cadence consumption after a deferred hard failure.
+
+    PAPER_UAT signals are intentionally committed even when broker firing
+    fails, so the outer transaction cannot simply roll back. The cadence
+    marker is the one piece that must be rewound: the period stays open and
+    the next healthy UAT run re-fires the rebalance.
+    """
+    if prior_state is None:
+        cur.execute(SQL_DELETE_REBALANCE_STATE, (sid,))
+        return
+    cur.execute(SQL_RESTORE_REBALANCE_STATE, (
+        sid,
+        prior_state.get('frequency'),
+        prior_state.get('last_period_key'),
+        prior_state.get('last_rebalance_date'),
+        bool(prior_state.get('seeded')),
+    ))
+
+
 # ── Signal-staleness guard (t_6d1ddfe8) ─────────────────────────────────────
 # SUE incident 2026-10: the October signal file landed 16 days late, so the
 # 10-01 rebalance fired on STALE August targets and the cadence gate then
@@ -1557,7 +1606,12 @@ def fetch_rebalance_state(cur, strategy_ids):
         return {}
     cur.execute(SQL_FETCH_REBALANCE_STATE, (strategy_ids,))
     return {
-        r[0]: {'frequency': r[1], 'last_period_key': r[2], 'last_rebalance_date': r[3]}
+        r[0]: {
+            'frequency': r[1],
+            'last_period_key': r[2],
+            'last_rebalance_date': r[3],
+            'seeded': bool(r[4]),
+        }
         for r in cur.fetchall()
     }
 
@@ -1938,7 +1992,7 @@ def open_new_positions(cur, open_values):
         # 0 made every open row look like a losing closed trade to any reader
         # filtering on `pnl IS NOT NULL` (e.g. the evaluation endpoint),
         # corrupting WR/PF/trade counts (memo 2026-08-17 section 2.3).
-        template="(%s, %s, 'LONG', %s, %s, %s, 'open', %s, %s, NULL, NULL, %s, %s, %s, %s, NOW(), NOW())"
+        template="(%s, %s, 'LONG', %s, %s, %s, 'open', %s, %s, NULL, NULL, %s, %s, %s, %s, 'forward_paper', NOW(), NOW())"
     )
     return cur.rowcount
 
@@ -2644,12 +2698,14 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
             execute = True
             gate_reason = ''
             stale_block = False
+            prior_rebalance_state = None
             if is_gated_frequency(strategy.get('frequency')):
                 freq = normalize_frequency(strategy['frequency'])
+                prior_rebalance_state = rebalance_state.get(sid)
                 execute, period_key, gate_reason = decide_rebalance(
-                    freq, today, rebalance_state.get(sid),
+                    freq, today, prior_rebalance_state,
                     backfill=backfill, force_rebalance=force_rebalance)
-                if rebalance_state.get(sid) is None:
+                if prior_rebalance_state is None:
                     # First run under the gate: seed the current period so a
                     # pre-gate book is never surprise-rebalanced mid-period.
                     cur.execute(SQL_SEED_REBALANCE_STATE, (sid, freq, period_key))
@@ -2702,7 +2758,12 @@ def run(backfill=False, strategy_id=None, date_str=None, max_position_pct=0.20,
                 # this run and NOTHING falls back to the DB paper ledger.
                 # Signals for the run were still published (qr_etl owns signal
                 # state; the broker owns order state — the raise is deferred
-                # until after upsert_signals inside rebalance_strategy).
+                # until after upsert_signals inside rebalance_strategy). The
+                # cadence marker must NOT be consumed by that failed fire:
+                # restore the pre-run period so the next healthy run retries.
+                if is_gated_frequency(strategy.get('frequency')):
+                    restore_rebalance_state(cur, sid, prior_rebalance_state)
+                    print(f"  {sid}: cadence marker restored; period remains open")
                 # Loud surface: per-strategy log + summary + non-zero exit.
                 uat_failures += 1
                 print(f"  {sid}: PAPER_UAT FIRE FAILED — {e}")

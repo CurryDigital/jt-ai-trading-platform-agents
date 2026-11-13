@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Consumption: Portfolio Tab — PnL History & Performance Attribution
-Reads from: gold.strategy_registry, gold.paper_trades_synthetic (attribution),
+Reads from: gold.strategy_registry, gold.paper_trades_synthetic (forward-paper attribution),
             gold.trade_executions (monthly returns; legacy source, may no-op)
 Writes to:  consumption.performance_monthly_returns
             consumption.performance_strategy_attribution
@@ -38,9 +38,9 @@ ON CONFLICT (portfolio_type, year, month) DO UPDATE SET
 # upserts the registry PAPER set, then deletes any 'paper' row not in that set
 # (sweeps TEST_*/manual_close/legacy S00x placeholders and prevents recurrence).
 # Semantics:
-#   num_trades/win_rate/avg_trade_return_pct/return_pct: realized CLOSED trades
-#     from gold.paper_trades_synthetic (NULL when a strategy has no closed
-#     trades yet — honest placeholder, never fake 0.000).
+#   num_trades/win_rate/avg_trade_return_pct/return_pct: realized CLOSED
+#     forward_paper trades from gold.paper_trades_synthetic (NULL when a
+#     strategy has no closed forward evidence yet — never replay/legacy rows).
 #   return_pct = 100 * realized_pnl$ / assigned_capital.
 #   contribution_pct = 100 * strategy realized pnl / total realized paper pnl
 #     (NULL when the total is zero/NULL — ledger is mostly open positions).
@@ -77,6 +77,7 @@ led AS (
         AVG(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END)
             FILTER (WHERE status = 'closed')                         AS wr
     FROM gold.paper_trades_synthetic
+    WHERE evidence_class = 'forward_paper'
     GROUP BY strategy_id
 ),
 pnl_tot AS (

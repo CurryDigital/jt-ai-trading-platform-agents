@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Backfill gold.paper_trades_synthetic for a single strategy from
-gold.strategy_ticker_scores_history.
+Backfill historical-replay rows in gold.paper_trades_synthetic for a single
+strategy from gold.strategy_ticker_scores_history.
 
 For each ticker, determine the first BUY date as entry and the first
 subsequent HOLD date as exit.  Uses silver.unified_prices for entry/exit
@@ -175,9 +175,9 @@ def backfill_strategy(conn, strategy_id, force=False):
                signal_weight, assigned_capital, pnl, pnl_pct,
                entry_price_source_date, entry_price_basis,
                exit_price_source_date, exit_price_basis,
-               created_at, updated_at)
+               evidence_class, created_at, updated_at)
             VALUES %s
-        """, values, template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())")
+        """, values, template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'historical_replay', NOW(), NOW())")
 
     conn.commit()
     cur.close()

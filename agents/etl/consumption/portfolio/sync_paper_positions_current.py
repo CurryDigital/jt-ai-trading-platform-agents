@@ -3,7 +3,7 @@
 Consumption: sync paper-strategy positions into portfolio_positions_current
 from the canonical paper ledger gold.paper_trades_synthetic.
 
-Reads from: gold.paper_trades_synthetic (status='open')
+Reads from: gold.paper_trades_synthetic (status='open', evidence_class='forward_paper')
 Writes to:  consumption.portfolio_positions_current (execution_mode='PAPER_TRADING')
 
 Why this exists (t_749e13f0):
@@ -50,6 +50,7 @@ WHERE c.execution_mode = 'PAPER_TRADING'
       NOT EXISTS (
           SELECT 1 FROM gold.paper_trades_synthetic p
           WHERE p.status = 'open'
+            AND p.evidence_class = 'forward_paper'
             AND p.strategy_id = c.strategy_id
             AND p.ticker = c.ticker
       )
@@ -94,6 +95,7 @@ FROM gold.paper_trades_synthetic p
 JOIN (
     SELECT strategy_id, ticker, COUNT(*) AS trades_count
     FROM gold.paper_trades_synthetic
+    WHERE evidence_class = 'forward_paper'
     GROUP BY strategy_id, ticker
 ) tc ON tc.strategy_id = p.strategy_id AND tc.ticker = p.ticker
 LEFT JOIN (
@@ -103,6 +105,7 @@ LEFT JOIN (
     ORDER BY ticker, date DESC
 ) b ON b.ticker = p.ticker
 WHERE p.status = 'open'
+  AND p.evidence_class = 'forward_paper'
   -- t_f51d67fe: only actively paper-monitored strategies are genuinely paper
   -- trading; the synthetic ledger also holds shadow rows for other approved
   -- strategies which must not surface as ACTIVE PAPER_TRADING positions.
